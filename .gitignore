@@ -1,0 +1,8 @@
+/target
+/botw-decomp
+/botw
+*.elf
+*.csv
+*.py
+/out
+

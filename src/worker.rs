@@ -8,15 +8,18 @@ pub fn num_threads() -> usize {
     }
 }
 
-pub struct Pool<TIn, TInIter: IntoIterator<Item=TIn>, TOut> {
+pub struct Pool<TIn, TInIter: IntoIterator<Item = TIn>, TOut> {
     jobs: TInIter::IntoIter,
     workers: Vec<Worker<TIn>>,
     recv: Receiver<(usize, TOut)>,
 }
 
-impl<TIn: Send+'static, 
-    TInIter: IntoIterator<Item=TIn> + Send + 'static,
-    TOut: Send+'static> Pool<TIn, TInIter, TOut> {
+impl<
+        TIn: Send + 'static,
+        TInIter: IntoIterator<Item = TIn> + Send + 'static,
+        TOut: Send + 'static,
+    > Pool<TIn, TInIter, TOut>
+{
     pub fn run(jobs: TInIter, f: fn(TIn) -> TOut) -> Self {
         let (send, recv) = mpsc::channel();
         let num = num_threads();
@@ -32,11 +35,17 @@ impl<TIn: Send+'static,
         }
         drop(send);
 
-        Self { jobs, workers, recv }
+        Self {
+            jobs,
+            workers,
+            recv,
+        }
     }
 }
 
-impl<TIn: Send+'static, TInIter: IntoIterator<Item=TIn>, TOut> Iterator for Pool<TIn, TInIter, TOut> {
+impl<TIn: Send + 'static, TInIter: IntoIterator<Item = TIn>, TOut> Iterator
+    for Pool<TIn, TInIter, TOut>
+{
     type Item = TOut;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -58,9 +67,9 @@ pub struct Worker<TIn> {
     thread: Option<JoinHandle<()>>,
 }
 
-impl<TIn: Send+'static> Worker<TIn> {
+impl<TIn: Send + 'static> Worker<TIn> {
     pub fn new<TOut: Send + 'static, TWork: Fn(TIn) -> TOut + Send + 'static>(
-        id: usize, 
+        id: usize,
         work: TWork,
         send_out: Sender<(usize, TOut)>,
     ) -> Self {
@@ -71,7 +80,10 @@ impl<TIn: Send+'static> Worker<TIn> {
                 let _ = send_out.send((id, out));
             }
         });
-        Self { send : Some(send), thread: Some(thread) }
+        Self {
+            send: Some(send),
+            thread: Some(thread),
+        }
     }
 
     pub fn send(&self, job: TIn) {

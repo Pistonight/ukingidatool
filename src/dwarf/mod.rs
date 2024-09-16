@@ -5,27 +5,27 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use elf::ElfBytes;
-use error_stack::{report, Report, Result, ResultExt};
+use error_stack::{Report, Result, ResultExt};
 use gimli::{
-    AttributeValue, DW_TAG_GNU_template_parameter_pack, DW_TAG_enumerator, DW_TAG_template_type_parameter, DW_TAG_variable, DW_TAG_volatile_type, DwAt, DwTag, DwarfFileType, EndianSlice, UnitSectionOffset 
+    AttributeValue, DW_TAG_GNU_template_parameter_pack, DW_TAG_enumerator,
+    DW_TAG_template_type_parameter, DW_TAG_variable, DW_TAG_volatile_type, DwAt, DwTag,
+    DwarfFileType, EndianSlice,
 };
 use gimli::{
-    DW_ATE_boolean, DW_ATE_float, DW_ATE_signed, DW_ATE_signed_char,
-    DW_ATE_unsigned, DW_ATE_unsigned_char, DW_AT_byte_size, DW_AT_encoding,
-    DW_TAG_array_type, DW_TAG_base_type, DW_TAG_class_type,
-    DW_TAG_compile_unit, DW_TAG_const_type, DW_TAG_enumeration_type, DW_TAG_formal_parameter,
-    DW_TAG_member, DW_TAG_namespace, DW_TAG_pointer_type, DW_TAG_ptr_to_member_type,
-    DW_TAG_reference_type, DW_TAG_structure_type, DW_TAG_subprogram, DW_TAG_subrange_type,
-    DW_TAG_subroutine_type, DW_TAG_typedef, DW_TAG_union_type, DW_TAG_unspecified_type,
+    DW_ATE_boolean, DW_ATE_float, DW_ATE_signed, DW_ATE_signed_char, DW_ATE_unsigned,
+    DW_ATE_unsigned_char, DW_AT_byte_size, DW_AT_encoding, DW_TAG_array_type, DW_TAG_base_type,
+    DW_TAG_class_type, DW_TAG_compile_unit, DW_TAG_const_type, DW_TAG_enumeration_type,
+    DW_TAG_formal_parameter, DW_TAG_inheritance, DW_TAG_member, DW_TAG_namespace,
+    DW_TAG_pointer_type, DW_TAG_ptr_to_member_type, DW_TAG_reference_type, DW_TAG_structure_type,
+    DW_TAG_subprogram, DW_TAG_subrange_type, DW_TAG_subroutine_type,
+    DW_TAG_template_value_parameter, DW_TAG_typedef, DW_TAG_union_type, DW_TAG_unspecified_type,
     DW_ATE_UTF,
-    DW_TAG_inheritance,
-    DW_TAG_template_value_parameter
 };
 
-
-
-use crate::parsed::{AddrType, AddressInfo, DataInfo, EnumInfo, FuncInfo, MemberInfo, Namespace, StructInfo, TypeComp, TypeInfo, TypePrim, TypeStore, TypeYaml, UnionInfo};
-// use crate::data::{InfoBuilder, TypeInfo};
+use crate::parsed::{
+    AddrType, AddressInfo, DataInfo, EnumInfo, FuncInfo, MemberInfo, Namespace, StructInfo,
+    TypeComp, TypeInfo, TypePrim, TypeStore, TypeYaml, UnionInfo,
+};
 use crate::util::{self, ProgressPrinter};
 
 mod entry_integer;
@@ -43,7 +43,6 @@ pub type Node<'i, 'a, 'u, 't> = gimli::EntriesTreeNode<'a, 'u, 't, In<'i>>;
 pub type Dwarf<'i> = gimli::Dwarf<In<'i>>;
 pub type UnitOffset = gimli::UnitOffset<usize>;
 pub type DIE<'i, 'a, 'u> = gimli::DebuggingInformationEntry<'a, 'u, In<'i>, usize>;
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -70,8 +69,6 @@ pub enum Error {
     ReadChild,
     #[error("Expecting a child entry, but none found")]
     ExpectingChild,
-    #[error("Expecting no more child entry, but there are more")]
-    ExpectingNoChild,
     #[error("Failed to read entry in unit")]
     ReadEntry,
     #[error("Failed to read DIE attribute `{0}`")]
@@ -99,8 +96,8 @@ pub enum Error {
     UnspecifiedType,
     #[error("Failed to get namespace for DIE")]
     Namespace,
-    #[error("Failed to get base type of struct/class")]
-    InvalidBaseType,
+    // #[error("Failed to get base type of struct/class")]
+    // InvalidBaseType,
     #[error("Hole in vtable")]
     MissingVtableEntry,
     #[error("Conflicting entry in vtable")]
@@ -111,12 +108,12 @@ pub enum Error {
     ConflictingName,
     #[error("Conflicting type for functions")]
     ConflictingInfo,
-    #[error("Subprogram with DW_AT_abstract_origin does not have a DW_AT_low_pc")]
-    NoAddressInAbstractOrigin,
-    #[error("Subprogram with DW_AT_specification does not have a DW_AT_low_pc")]
-    NoAddressInSpecification,
-    #[error("DIE does not have a linkage name, abstract origin, or specification")]
-    NoLinkageName,
+    // #[error("Subprogram with DW_AT_abstract_origin does not have a DW_AT_low_pc")]
+    // NoAddressInAbstractOrigin,
+    // #[error("Subprogram with DW_AT_specification does not have a DW_AT_low_pc")]
+    // NoAddressInSpecification,
+    // #[error("DIE does not have a linkage name, abstract origin, or specification")]
+    // NoLinkageName,
     #[error("DW_TAG_variable doesn't have a DW_AT_specification")]
     NoSpecificationInVariable,
 
@@ -127,6 +124,13 @@ pub enum Error {
 
     #[error("{0} at 0x{1:08x}")]
     Ctx(&'static str, usize),
+
+    #[error("Failed to deduplicate/resolve types")]
+    ResolveType,
+    #[error("Failed to garbage collect types")]
+    GarbageCollectType,
+    #[error("Failed to create type definitions")]
+    CreateTypeDefinition,
 
     #[error("Failed to write types.yaml")]
     WriteFile,
@@ -145,7 +149,12 @@ macro_rules! process_units {
     }};
 }
 
-pub fn extract(elf_path: &Path, uking_symbols: &mut BTreeMap<String, u64>, uking_data_symbols: &BTreeSet<String>) -> Result<(), Error> {
+pub fn extract(
+    elf_path: &Path,
+    output_path: impl AsRef<Path>,
+    uking_symbols: &mut BTreeMap<String, u64>,
+    uking_data_symbols: &BTreeSet<String>,
+) -> Result<(), Error> {
     println!("Extracting DAWRF from ELF {}", elf_path.display());
     let uking_elf = util::read_as_bytes(elf_path)
         .change_context_lazy(|| Error::ReadElf(elf_path.display().to_string()))?;
@@ -187,7 +196,7 @@ pub fn extract(elf_path: &Path, uking_symbols: &mut BTreeMap<String, u64>, uking
         let mut offset_to_ns = BTreeMap::new();
         let mut namespace = Namespace::default();
         process_units!(units, "Register namespaces", unit, root, {
-            node_typeinfo_pass1(root, unit, &mut namespace, &mut offset_to_ns)?;
+            pass1(root, unit, &mut namespace, &mut offset_to_ns)?;
         });
         offset_to_ns
     };
@@ -195,16 +204,13 @@ pub fn extract(elf_path: &Path, uking_symbols: &mut BTreeMap<String, u64>, uking
     let offset_to_ty = {
         let mut offset_to_ty = BTreeMap::new();
         process_units!(units, "Register types", unit, root, {
-            node_typeinfo_pass2(
-                root,
-                unit,
-                &offset_to_ns,
-                &mut offset_to_ty,
-            )?;
+            node_typeinfo_pass2(root, unit, &offset_to_ns, &mut offset_to_ty)?;
         });
         offset_to_ty
     };
-    let mut types = TypeStore::resolve(offset_to_ty, &offset_to_ns);
+    let namespaces = offset_to_ns.into();
+    let mut types =
+        TypeStore::resolve(offset_to_ty, &namespaces).change_context(Error::ResolveType)?;
 
     // PASS 3 - symbols
     let data_types = {
@@ -217,45 +223,56 @@ pub fn extract(elf_path: &Path, uking_symbols: &mut BTreeMap<String, u64>, uking
                 uking_symbols,
                 &mut addr_to_name,
                 &mut data_types,
-                &types
+                &types,
             )?;
         });
         for (symbol, address) in std::mem::take(uking_symbols) {
             if data_types.contains_key(&symbol) {
                 // already processed, not possible
-                panic!("Symbol `{}` is already processed. This shouldn't be possible", symbol);
+                panic!(
+                    "Symbol `{}` is already processed. This shouldn't be possible",
+                    symbol
+                );
             }
             if uking_data_symbols.contains(&symbol) {
                 // data symbol
-                data_types.insert(symbol.clone(), AddressInfo {
-                    uking_address: address,
-                    name: symbol,
-                    info: AddrType::Data(DataInfo {
-                        ty_offset: None,
-                    }),
-                });
+                data_types.insert(
+                    symbol.clone(),
+                    AddressInfo {
+                        uking_address: address,
+                        name: symbol,
+                        info: AddrType::Data(DataInfo { ty_offset: None }),
+                    },
+                );
             } else {
                 // function symbol
-            data_types.insert(symbol.clone(), AddressInfo {
-                uking_address: address,
-                name: symbol,
-                info: AddrType::Undecompiled,
-            });
+                data_types.insert(
+                    symbol.clone(),
+                    AddressInfo {
+                        uking_address: address,
+                        name: symbol,
+                        info: AddrType::Undecompiled,
+                    },
+                );
             }
         }
         data_types
     };
-    // PASS 4 - Type GC
+    // Type GC
     {
         let progress = ProgressPrinter::new(data_types.len(), "Garbage collect types");
         for (i, (name, info)) in data_types.iter().enumerate() {
             progress.print(i, name);
-            info.mark_types(&mut types);
+            info.mark_types(&mut types)
+                .change_context(Error::GarbageCollectType)?;
         }
         progress.done();
     }
-    // PASS 5 - Type Output
-    let type_defs = types.create_defs(&offset_to_ns);
+    // Type Output
+    let type_defs = types
+        .create_defs()
+        .change_context(Error::CreateTypeDefinition)?;
+    println!("Extracted {} types", type_defs.len());
     let mut type_yaml = String::new();
     type_yaml.push_str("enums:\n");
     for enum_def in type_defs.values().filter_map(|x| x.as_enum()) {
@@ -269,49 +286,17 @@ pub fn extract(elf_path: &Path, uking_symbols: &mut BTreeMap<String, u64>, uking
     for struct_def in type_defs.values().filter_map(|x| x.as_struct()) {
         type_yaml.push_str(&struct_def.yaml_string());
     }
-    std::fs::write("types.yaml", type_yaml).change_context(Error::WriteFile)?;
+
+    // Write Output
+    let output_path_str = output_path.as_ref().display().to_string();
+    std::fs::write(output_path, type_yaml).change_context(Error::WriteFile)?;
+    println!("Output written to {}", output_path_str);
 
     Ok(())
 }
 
-// fn process_unit<'i, 'a, 'u, 't>(
-//     node: Node<'i, 'a, 'u, 't>,
-//     unit: &Unit<'i>,
-//     dwarf: &Dwarf<'i>,
-// ) -> Result<(), Error> {
-//     let entry = node.entry();
-//     let tag = entry.tag();
-//     // it should be a compile unit
-//     if tag != DW_TAG_compile_unit {
-//         return Err(report!(Error::UnexpectedTag(tag, DW_TAG_compile_unit)));
-//     }
-//     // get the name for reporting
-//     let name = match entry
-//         .attr_value(DW_AT_name)
-//         .change_context(Error::ReadEntryAttr(DW_AT_name))? {
-//             None => "<unknown>",
-//             Some(attr) => {
-//                 dwarf.attr_string(&unit, attr).change_context(Error::AttrString)?
-//                     .to_string().change_context(Error::AttrString)?
-//             }
-//         };
-//     println!("Processing Compile Unit `{}`...", name);
-//     // TYPEINFO PASS 1
-//     let mut offset_to_ns = HashMap::new();
-//     let mut namespace = Namespace::default();
-//     node_typeinfo_pass1(node, unit, &name, dwarf, &mut namespace, &mut offset_to_ns)?;
-//     if offset_to_ns.is_empty() {
-//         // println!("No type information found in `{}`", name);
-//         return Ok(());
-//     }
-//     println!("{:?}", offset_to_ns);
-//
-//     todo!()
-// }
-
-/////////////// TYPEINFO PASS 1 ///////////////
+/////////////// PASS 1 ///////////////
 // Create offset -> namespace map
-
 
 macro_rules! namespace_scope {
     ($namespace:ident, $name:expr, $block:block) => {{
@@ -328,7 +313,7 @@ macro_rules! namespace_scope {
     }};
 }
 
-fn node_typeinfo_pass1<'d, 'i, 'a, 'u, 't>(
+fn pass1<'d, 'i, 'a, 'u, 't>(
     node: Node<'i, 'a, 'u, 't>,
     unit: &UnitCtx<'d, 'i>,
     namespace: &mut Namespace<'i>,
@@ -338,26 +323,29 @@ fn node_typeinfo_pass1<'d, 'i, 'a, 'u, 't>(
     match entry.tag() {
         DW_TAG_compile_unit => {
             // top-most case
-            unit.for_each_child(node, |child| {
-                node_typeinfo_pass1(child, unit, namespace, offset_to_ns)
-            })?;
+            unit.for_each_child(node, |child| pass1(child, unit, namespace, offset_to_ns))?;
         }
         DW_TAG_structure_type
         | DW_TAG_class_type
         | DW_TAG_union_type
         | DW_TAG_enumeration_type
         | DW_TAG_typedef
-        | DW_TAG_unspecified_type 
+        | DW_TAG_unspecified_type
         | DW_TAG_variable
-        => {
+        | DW_TAG_pointer_type
+        | DW_TAG_reference_type
+        | DW_TAG_const_type
+        | DW_TAG_volatile_type
+        | DW_TAG_array_type
+        | DW_TAG_subroutine_type
+        | DW_TAG_ptr_to_member_type
+        | DW_TAG_base_type => {
             let offset = unit.to_global_offset(entry.offset());
             offset_to_ns.insert(offset, namespace.clone());
             // can have inner types, and may be anonymous
             let name = unit.get_entry_name_optional(entry)?;
             namespace_scope!(namespace, name, {
-                unit.for_each_child(node, |child| {
-                    node_typeinfo_pass1(child, unit, namespace, offset_to_ns)
-                })?;
+                unit.for_each_child(node, |child| pass1(child, unit, namespace, offset_to_ns))?;
             });
         }
         DW_TAG_subprogram => {
@@ -369,18 +357,14 @@ fn node_typeinfo_pass1<'d, 'i, 'a, 'u, 't>(
                 None => Cow::Owned(format!("subprogram_0x{:08x}", offset)),
             };
             namespace_scope!(namespace, Some(name), {
-                unit.for_each_child(node, |child| {
-                    node_typeinfo_pass1(child, unit, namespace, offset_to_ns)
-                })?;
+                unit.for_each_child(node, |child| pass1(child, unit, namespace, offset_to_ns))?;
             });
         }
         DW_TAG_namespace => {
             let name = unit.get_entry_name_optional(entry)?;
             // ok to have anonymous namespaces
             namespace_scope!(namespace, name, {
-                unit.for_each_child(node, |child| {
-                    node_typeinfo_pass1(child, unit, namespace, offset_to_ns)
-                })?;
+                unit.for_each_child(node, |child| pass1(child, unit, namespace, offset_to_ns))?;
             });
         }
         _ => {
@@ -402,23 +386,29 @@ fn node_typeinfo_pass2<'d, 'i, 'a, 'u, 't>(
 ) -> Result<(), Error> {
     let entry = node.entry();
     match entry.tag() {
-        DW_TAG_structure_type | DW_TAG_class_type |
-        DW_TAG_union_type |
-        DW_TAG_enumeration_type |
-        DW_TAG_unspecified_type | DW_TAG_typedef |
-        DW_TAG_pointer_type | DW_TAG_reference_type |
-        DW_TAG_const_type |
-        DW_TAG_volatile_type |
-        DW_TAG_array_type |
-        DW_TAG_subroutine_type |
-        DW_TAG_ptr_to_member_type |
-        DW_TAG_base_type  => {
+        DW_TAG_structure_type
+        | DW_TAG_class_type
+        | DW_TAG_union_type
+        | DW_TAG_enumeration_type
+        | DW_TAG_unspecified_type
+        | DW_TAG_typedef
+        | DW_TAG_pointer_type
+        | DW_TAG_reference_type
+        | DW_TAG_const_type
+        | DW_TAG_volatile_type
+        | DW_TAG_array_type
+        | DW_TAG_subroutine_type
+        | DW_TAG_ptr_to_member_type
+        | DW_TAG_base_type => {
             read_type_at_offset(entry.offset(), unit, offset_to_ns, offset_to_ty)?;
             if !offset_to_ty.contains_key(&unit.to_global_offset(entry.offset())) {
-                panic!("Failed to read type at offset 0x{:08x}", unit.to_global_offset(entry.offset()));
+                panic!(
+                    "Failed to read type at offset 0x{:08x}",
+                    unit.to_global_offset(entry.offset())
+                );
             }
         }
-        _ => { }
+        _ => {}
     }
     unit.for_each_child(node, |child| {
         node_typeinfo_pass2(child, unit, offset_to_ns, offset_to_ty)
@@ -441,16 +431,30 @@ fn pass3<'d, 'i, 'a, 'u, 't>(
     let entry = node.entry();
     match entry.tag() {
         DW_TAG_subprogram => {
-            read_subprogram(&entry, unit, uking_symbols, elf_addr_to_name, data_type, None, types)?;
+            read_subprogram(
+                &entry,
+                unit,
+                uking_symbols,
+                elf_addr_to_name,
+                data_type,
+                None,
+                types,
+            )?;
         }
         DW_TAG_variable => {
             read_variable(&entry, unit, uking_symbols, data_type, types)?;
         }
-        _ => { 
-        }
+        _ => {}
     }
     unit.for_each_child(node, |child| {
-        pass3(child, unit, uking_symbols, elf_addr_to_name, data_type, types)
+        pass3(
+            child,
+            unit,
+            uking_symbols,
+            elf_addr_to_name,
+            data_type,
+            types,
+        )
     })?;
 
     Ok(())
@@ -472,20 +476,24 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
                 // make sure it's not conflicting with the input elf address
                 if let Some(y) = input_elf_addr {
                     if y != addr {
-                        return bad!(unit, unit.to_global_offset(offset), Error::ConflictingAddress)
-                            .attach_printable(format!("Function `{}`", linkage_name))
-                            .attach_printable(format!("0x{:08x} != 0x{:08x}", y, addr));
+                        return bad!(
+                            unit,
+                            unit.to_global_offset(offset),
+                            Error::ConflictingAddress
+                        )
+                        .attach_printable(format!("Function `{}`", linkage_name))
+                        .attach_printable(format!("0x{:08x} != 0x{:08x}", y, addr));
                     }
                 }
                 addr
             }
-            None => match input_elf_addr{
+            None => match input_elf_addr {
                 Some(addr) => addr,
                 None => {
                     // we don't have address to process this entry yet, will come back
                     return Ok(());
                 }
-            }
+            },
         };
         // produce AddressInfo
         // return type
@@ -501,7 +509,9 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
             match entry.tag() {
                 DW_TAG_formal_parameter => {
                     let name = unit.get_entry_name_optional(entry)?.map(|x| x.to_string());
-                    let type_offset = unit.get_entry_type_offset_optional(entry)?.map(|x| unit.to_global_offset(x));
+                    let type_offset = unit
+                        .get_entry_type_offset_optional(entry)?
+                        .map(|x| unit.to_global_offset(x));
                     args.push((name, type_offset));
                 }
                 _ => {
@@ -525,17 +535,25 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
                 if old_name != linkage_name {
                     return bad!(unit, unit.to_global_offset(offset), Error::ConflictingName)
                         .attach_printable(format!("Function `{}`", linkage_name))
-                        .attach_printable(format!("0x{:08x} is already assigned to `{}`", addr, old_name));
+                        .attach_printable(format!(
+                            "0x{:08x} is already assigned to `{}`",
+                            addr, old_name
+                        ));
                 }
             }
         }
         // if there's some old info, merge it
         if let Some(old_info) = data_type.get_mut(linkage_name) {
             let check = old_info.check_and_merge(addr_info.clone(), types);
-            err_ctx!(unit, unit.to_global_offset(offset), Error::ConflictingInfo, check)
-                    .attach_printable(format!("Function `{}`", linkage_name))
-                    .attach_printable(format!("Old Info: {}", old_info))
-                    .attach_printable(format!("New Info: {}", addr_info))?;
+            err_ctx!(
+                unit,
+                unit.to_global_offset(offset),
+                Error::ConflictingInfo,
+                check
+            )
+            .attach_printable(format!("Function `{}`", linkage_name))
+            .attach_printable(format!("Old Info: {}", old_info))
+            .attach_printable(format!("New Info: {}", addr_info))?;
         } else {
             if let Some(uking_address) = uking_symbols.remove(linkage_name) {
                 let mut addr_info = addr_info;
@@ -556,7 +574,15 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
             }
             Some(addr) => addr,
         };
-        return read_subprogram(&origin_entry, unit, uking_symbols, elf_addr_to_name, data_type, Some(addr), types);
+        return read_subprogram(
+            &origin_entry,
+            unit,
+            uking_symbols,
+            elf_addr_to_name,
+            data_type,
+            Some(addr),
+            types,
+        );
     }
     if let Some(specification) = unit.get_entry_specification(entry)? {
         let origin_entry = unit.entry_at(specification)?;
@@ -567,7 +593,15 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
             }
             Some(addr) => addr,
         };
-        return read_subprogram(&origin_entry, unit, uking_symbols, elf_addr_to_name, data_type, Some(addr), types);
+        return read_subprogram(
+            &origin_entry,
+            unit,
+            uking_symbols,
+            elf_addr_to_name,
+            data_type,
+            Some(addr),
+            types,
+        );
     }
     // ones that don't have name shouldn't matter
     // let external = unit.get_entry_external(entry)?;
@@ -587,7 +621,6 @@ fn read_variable<'d, 'i, 'a, 'u>(
     data_type: &mut BTreeMap<String, AddressInfo>,
     types: &TypeStore,
 ) -> Result<(), Error> {
-
     if let Some(linkage_name) = unit.get_entry_linkage_name(entry)? {
         let ty_offset = {
             match unit.get_entry_type_offset_optional(entry)? {
@@ -595,7 +628,12 @@ fn read_variable<'d, 'i, 'a, 'u>(
                 None => {
                     // try specification
                     let specification = unit.get_entry_specification(entry)?;
-                    let specification = opt_ctx!(unit, unit.to_global_offset(entry.offset()), Error::NoSpecificationInVariable, specification)?;
+                    let specification = opt_ctx!(
+                        unit,
+                        unit.to_global_offset(entry.offset()),
+                        Error::NoSpecificationInVariable,
+                        specification
+                    )?;
                     let spec_entry = unit.entry_at(specification)?;
                     unit.get_entry_type_offset(&spec_entry)?
                 }
@@ -612,11 +650,16 @@ fn read_variable<'d, 'i, 'a, 'u>(
         };
         // if there's some old info, merge it
         if let Some(old_info) = data_type.get_mut(linkage_name) {
-        let check = old_info.check_and_merge(addr_info.clone(), types);
-        err_ctx!(unit, unit.to_global_offset(entry.offset()), Error::ConflictingInfo, check)
-                .attach_printable(format!("Data `{}`", linkage_name))
-                .attach_printable(format!("Old Info: {}", old_info))
-                .attach_printable(format!("New Info: {}", addr_info))?;
+            let check = old_info.check_and_merge(addr_info.clone(), types);
+            err_ctx!(
+                unit,
+                unit.to_global_offset(entry.offset()),
+                Error::ConflictingInfo,
+                check
+            )
+            .attach_printable(format!("Data `{}`", linkage_name))
+            .attach_printable(format!("Old Info: {}", old_info))
+            .attach_printable(format!("New Info: {}", addr_info))?;
         } else {
             if let Some(uking_address) = uking_symbols.remove(linkage_name) {
                 let mut addr_info = addr_info;
@@ -692,12 +735,8 @@ fn read_type_at_offset<'d, 'i>(
         DW_TAG_structure_type | DW_TAG_class_type => {
             read_structure_type(&entry, unit, offset_to_ns, offset_to_ty)?
         }
-        DW_TAG_union_type => {
-            read_union_type(&entry, unit, offset_to_ns, offset_to_ty)?
-        }
-        DW_TAG_enumeration_type => {
-            read_enum_type(&entry, unit, offset_to_ns, offset_to_ty)?
-        }
+        DW_TAG_union_type => read_union_type(&entry, unit, offset_to_ns, offset_to_ty)?,
+        DW_TAG_enumeration_type => read_enum_type(&entry, unit, offset_to_ns, offset_to_ty)?,
         DW_TAG_unspecified_type => {
             // guess
             let name = unit.get_entry_name(&entry)?;
@@ -707,7 +746,8 @@ fn read_type_at_offset<'d, 'i>(
                 _ => {
                     let offset = unit.to_global_offset(offset);
                     return bad!(unit, offset, Error::UnspecifiedType)
-                .attach_printable(format!("the DW_AT_name is: {}", name))},
+                        .attach_printable(format!("the DW_AT_name is: {}", name));
+                }
             }
         }
         DW_TAG_typedef => {
@@ -716,7 +756,7 @@ fn read_type_at_offset<'d, 'i>(
             match unit.get_entry_type_offset_optional(&entry)? {
                 // typedef to void.. just use void
                 None => TypeInfo::Prim(TypePrim::Void),
-                Some(x) => TypeInfo::Typedef(namespace.get_with(name), unit.to_global_offset(x))
+                Some(x) => TypeInfo::Typedef(namespace.get_with(name), unit.to_global_offset(x)),
             }
         }
         // T* or T&
@@ -759,21 +799,18 @@ fn read_type_at_offset<'d, 'i>(
             }
         }
         // T(*)(Args...)
-        DW_TAG_subroutine_type => {
-            read_subroutine_type(&entry, unit)?
-        }
+        DW_TAG_subroutine_type => read_subroutine_type(&entry, unit)?,
         // PTM
         DW_TAG_ptr_to_member_type => {
             let this_ty = unit.get_entry_containing_type_offset(&entry)?;
             let this_ty = unit.to_global_offset(this_ty);
             let ty = unit.get_entry_type_offset(&entry)?;
             let entry = unit.entry_at(ty)?;
-            let global_offset = unit.to_global_offset(offset);
             if entry.tag() == DW_TAG_subroutine_type {
                 // PTMF
 
-                if let TypeInfo::Comp(TypeComp::Subroutine(ret, params)) = 
-                read_subroutine_type(&entry, unit)?
+                if let TypeInfo::Comp(TypeComp::Subroutine(ret, params)) =
+                    read_subroutine_type(&entry, unit)?
                 {
                     TypeInfo::Comp(TypeComp::Ptmf(this_ty, ret, params))
                 } else {
@@ -784,9 +821,7 @@ fn read_type_at_offset<'d, 'i>(
                 TypeInfo::Comp(TypeComp::Ptr(unit.to_global_offset(ty)))
             }
         }
-        DW_TAG_base_type => {
-            TypeInfo::Prim(read_base_type(&entry, unit)?)
-        }
+        DW_TAG_base_type => TypeInfo::Prim(read_base_type(&entry, unit)?),
 
         tag => {
             let global_offset = unit.to_global_offset(offset);
@@ -810,12 +845,16 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
             let namespace = unit.get_namespace(entry.offset(), offset_to_ns)?;
             Some(namespace.get_with(name))
         }
-        None => None
+        None => None,
     };
     // is declaration?
     if unit.get_entry_declaration(&entry)? {
         if name.is_none() {
-            return bad!(unit, unit.to_global_offset(entry.offset()), Error::UnexpectedAnonymousDeclaration);
+            return bad!(
+                unit,
+                unit.to_global_offset(entry.offset()),
+                Error::UnexpectedAnonymousDeclaration
+            );
         }
         return Ok(TypeInfo::Struct(StructInfo {
             name,
@@ -879,16 +918,14 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
                             _ => {
                                 // transparent base type
                                 break;
-                            }
-                            // _ => {
-                            //     return bad!(unit, unit.to_global_offset(entry.offset()), Error::InvalidBaseType)
-                            //         .attach_printable(format!("Base type offset: 0x{:08x}", unit.to_global_offset(ty_offset)));
-                            // }
+                            } // _ => {
+                              //     return bad!(unit, unit.to_global_offset(entry.offset()), Error::InvalidBaseType)
+                              //         .attach_printable(format!("Base type offset: 0x{:08x}", unit.to_global_offset(ty_offset)));
+                              // }
                         }
                     }
-
                 }
-                let name = if offset == 0 { 
+                let name = if offset == 0 {
                     "base".to_string()
                 } else {
                     format!("base_{:x}", offset)
@@ -906,19 +943,27 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
                     // dtors are weird that they are declared 0th, but might not actually be
                     if name.starts_with("~") {
                         if velem != 0 {
-                        return bad!(unit, unit.to_global_offset(entry.offset()), Error::ConflictingVtableEntry)
+                            return bad!(
+                                unit,
+                                unit.to_global_offset(entry.offset()),
+                                Error::ConflictingVtableEntry
+                            )
                             .attach_printable(format!("Vtable entry {}", velem))
                             .attach_printable(format!("Vtable: {:?}", vtable))
-                                .attach_printable(format!("Need to insert: {:?}", name))
+                            .attach_printable(format!("Need to insert: {:?}", name))
                             .attach_printable("Expecting dtor to be declared 0th in vtable");
                         }
                         vdtor_name = Some(name.clone());
                     } else {
                         if !vtable_locs.insert(velem) {
-                            return bad!(unit, unit.to_global_offset(entry.offset()), Error::ConflictingVtableEntry)
-                                .attach_printable(format!("Vtable entry {}", velem))
-                                .attach_printable(format!("Vtable: {:?}", vtable))
-                                .attach_printable(format!("Need to insert: {:?}", name));
+                            return bad!(
+                                unit,
+                                unit.to_global_offset(entry.offset()),
+                                Error::ConflictingVtableEntry
+                            )
+                            .attach_printable(format!("Vtable entry {}", velem))
+                            .attach_printable(format!("Vtable: {:?}", vtable))
+                            .attach_printable(format!("Need to insert: {:?}", name));
                         }
                         if velem >= vtable.len() {
                             vtable.resize(velem + 1, "".to_string());
@@ -927,28 +972,30 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
                     }
                 }
             }
-            DW_TAG_structure_type | DW_TAG_class_type | DW_TAG_union_type | DW_TAG_enumeration_type 
+            DW_TAG_structure_type
+            | DW_TAG_class_type
+            | DW_TAG_union_type
+            | DW_TAG_enumeration_type
             | DW_TAG_typedef
             | DW_TAG_template_type_parameter
             | DW_TAG_template_value_parameter
-            | DW_TAG_GNU_template_parameter_pack
-            => {
+            | DW_TAG_GNU_template_parameter_pack => {
                 // ignore subtypes
             }
             tag => {
                 let global_offset = unit.to_global_offset(entry.offset());
                 return bad!(unit, global_offset, Error::UnexpectedTag(tag))
-                .attach_printable("reading DW_TAG_structure_type");
-            
+                    .attach_printable("reading DW_TAG_structure_type");
             }
         }
         Ok(())
     })?;
     // place virtual dtor
     if let Some(vdtor_name) = vdtor_name {
-        match vtable.iter().position(|x| {
-            x.starts_with('~') || x.is_empty()
-        }) {
+        match vtable
+            .iter()
+            .position(|x| x.starts_with('~') || x.is_empty())
+        {
             Some(i) => {
                 vtable[i] = vdtor_name;
             }
@@ -959,18 +1006,22 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
     }
     // handle virtual destructors
     if vtable.len() > 1 {
-        for i in 0..vtable.len()-1 {
-            if vtable[i].starts_with('~') && vtable[i+1].is_empty() {
-                vtable[i+1] = vtable[i].clone();
+        for i in 0..vtable.len() - 1 {
+            if vtable[i].starts_with('~') && vtable[i + 1].is_empty() {
+                vtable[i + 1] = vtable[i].clone();
             }
         }
     }
     // check no holes in vtable
     for (i, name) in vtable.iter().enumerate() {
         if name.is_empty() {
-            return bad!(unit, unit.to_global_offset(entry.offset()), Error::MissingVtableEntry)
-                .attach_printable(format!("Vtable entry {}", i))
-                .            attach_printable(format!("Vtable: {:?}", vtable));
+            return bad!(
+                unit,
+                unit.to_global_offset(entry.offset()),
+                Error::MissingVtableEntry
+            )
+            .attach_printable(format!("Vtable entry {}", i))
+            .attach_printable(format!("Vtable: {:?}", vtable));
         }
     }
     // transparent struct
@@ -1021,12 +1072,16 @@ fn read_union_type<'d, 'i, 'a, 'u>(
             let namespace = unit.get_namespace(entry.offset(), offset_to_ns)?;
             Some(namespace.get_with(name))
         }
-        None => None
+        None => None,
     };
     // is declaration?
     if unit.get_entry_declaration(&entry)? {
         if name.is_none() {
-            return bad!(unit, unit.to_global_offset(entry.offset()), Error::UnexpectedAnonymousDeclaration);
+            return bad!(
+                unit,
+                unit.to_global_offset(entry.offset()),
+                Error::UnexpectedAnonymousDeclaration
+            );
         }
         return Ok(TypeInfo::Union(UnionInfo {
             name,
@@ -1053,26 +1108,29 @@ fn read_union_type<'d, 'i, 'a, 'u>(
                     members.push((name, ty_offset));
                 }
             }
-            DW_TAG_structure_type 
-            | DW_TAG_class_type 
-            | DW_TAG_union_type | DW_TAG_enumeration_type 
+            DW_TAG_structure_type
+            | DW_TAG_class_type
+            | DW_TAG_union_type
+            | DW_TAG_enumeration_type
             | DW_TAG_typedef
             | DW_TAG_template_type_parameter
             | DW_TAG_template_value_parameter
-            | DW_TAG_GNU_template_parameter_pack
-            => {
+            | DW_TAG_GNU_template_parameter_pack => {
                 // ignore subtypes
             }
             DW_TAG_subprogram => {
                 if unit.get_entry_vtable_elem_location(&entry)?.is_some() {
-                    return bad!(unit, unit.to_global_offset(entry.offset()), Error::UnexpectedVirtualUnion);
+                    return bad!(
+                        unit,
+                        unit.to_global_offset(entry.offset()),
+                        Error::UnexpectedVirtualUnion
+                    );
                 }
             }
             tag => {
                 let global_offset = unit.to_global_offset(entry.offset());
                 return bad!(unit, global_offset, Error::UnexpectedTag(tag))
-                .attach_printable("reading DW_TAG_union_type");
-            
+                    .attach_printable("reading DW_TAG_union_type");
             }
         }
         Ok(())
@@ -1080,7 +1138,7 @@ fn read_union_type<'d, 'i, 'a, 'u>(
 
     // transparent union
     // if the union has 1 member
-    if members.len() == 1{
+    if members.len() == 1 {
         let member = &members[0];
         if member.0.is_none() {
             match name {
@@ -1118,12 +1176,16 @@ fn read_enum_type<'d, 'i, 'a, 'u>(
             let namespace = unit.get_namespace(entry.offset(), offset_to_ns)?;
             Some(namespace.get_with(name))
         }
-        None => None
+        None => None,
     };
     // is declaration?
     if unit.get_entry_declaration(&entry)? {
         if name.is_none() {
-            return bad!(unit, unit.to_global_offset(entry.offset()), Error::UnexpectedAnonymousDeclaration);
+            return bad!(
+                unit,
+                unit.to_global_offset(entry.offset()),
+                Error::UnexpectedAnonymousDeclaration
+            );
         }
         return Ok(TypeInfo::Enum(EnumInfo {
             name,
@@ -1142,8 +1204,13 @@ fn read_enum_type<'d, 'i, 'a, 'u>(
                     TypeInfo::Typedef(_, next) => {
                         off = unit.to_unit_offset(next);
                     }
-                    _ => return bad!(unit, unit.to_global_offset(off), Error::UnexpectedEnumType)
-                    .attach_printable(format!("base type is {}, which is not primitive", ty)),
+                    _ => {
+                        return bad!(unit, unit.to_global_offset(off), Error::UnexpectedEnumType)
+                            .attach_printable(format!(
+                                "base type is {}, which is not primitive",
+                                ty
+                            ))
+                    }
                 }
             }
         }
@@ -1166,7 +1233,7 @@ fn read_enum_type<'d, 'i, 'a, 'u>(
             tag => {
                 let global_offset = unit.to_global_offset(entry.offset());
                 return bad!(unit, global_offset, Error::UnexpectedTag(tag))
-                .attach_printable("reading DW_TAG_enumeration_type");
+                    .attach_printable("reading DW_TAG_enumeration_type");
             }
         }
         Ok(())
@@ -1209,8 +1276,10 @@ fn read_subroutine_type<'d, 'i, 'a, 'u>(
 }
 
 /// Get TypeInfo for a DW_TAG_base_type
-fn read_base_type<'d, 'i, 'a, 'u>(entry: &DIE<'i, 'a, 'u>
-    ,unit: &UnitCtx<'d, 'i>) -> Result<TypePrim, Error> {
+fn read_base_type<'d, 'i, 'a, 'u>(
+    entry: &DIE<'i, 'a, 'u>,
+    unit: &UnitCtx<'d, 'i>,
+) -> Result<TypePrim, Error> {
     let offset = unit.to_global_offset(entry.offset());
     let encoding = err_ctx!(
         unit,
@@ -1242,131 +1311,35 @@ fn read_base_type<'d, 'i, 'a, 'u>(entry: &DIE<'i, 'a, 'u>
         (DW_ATE_signed, 0x1) => Ok(TypePrim::I8),
         (DW_ATE_signed_char, 0x1) => Ok(TypePrim::I8),
 
-            (DW_ATE_unsigned, 0x2) => Ok(TypePrim::U16),
-            (DW_ATE_signed, 0x2) => Ok(TypePrim::I16),
-            (DW_ATE_UTF, 0x2) => Ok(TypePrim::U16),
+        (DW_ATE_unsigned, 0x2) => Ok(TypePrim::U16),
+        (DW_ATE_signed, 0x2) => Ok(TypePrim::I16),
+        (DW_ATE_UTF, 0x2) => Ok(TypePrim::U16),
 
-            (DW_ATE_unsigned, 0x4) => Ok(TypePrim::U32),
-            (DW_ATE_signed, 0x4) => Ok(TypePrim::I32),
-            (DW_ATE_float, 0x4) => Ok(TypePrim::F32),
+        (DW_ATE_unsigned, 0x4) => Ok(TypePrim::U32),
+        (DW_ATE_signed, 0x4) => Ok(TypePrim::I32),
+        (DW_ATE_float, 0x4) => Ok(TypePrim::F32),
 
-            (DW_ATE_unsigned, 0x8) => Ok(TypePrim::U64),
-            (DW_ATE_signed, 0x8) => Ok(TypePrim::I64),
-            (DW_ATE_float, 0x8) => Ok(TypePrim::F64),
+        (DW_ATE_unsigned, 0x8) => Ok(TypePrim::U64),
+        (DW_ATE_signed, 0x8) => Ok(TypePrim::I64),
+        (DW_ATE_float, 0x8) => Ok(TypePrim::F64),
 
-            (DW_ATE_unsigned, 0x10) => Ok(TypePrim::U128),
-            (DW_ATE_signed, 0x10) => Ok(TypePrim::I128),
-            (DW_ATE_float, 0x10) => Ok(TypePrim::F128),
-            _ => {
-                // TODO complete list above
-                return bad!(
-                    unit,
-                    offset,
-                    Error::BadEntryAttrTypes(
-                        [DW_AT_encoding.to_string(), DW_AT_byte_size.to_string(),].join(", ")
-                    )
+        (DW_ATE_unsigned, 0x10) => Ok(TypePrim::U128),
+        (DW_ATE_signed, 0x10) => Ok(TypePrim::I128),
+        (DW_ATE_float, 0x10) => Ok(TypePrim::F128),
+        _ => {
+            // TODO complete list above
+            return bad!(
+                unit,
+                offset,
+                Error::BadEntryAttrTypes(
+                    [DW_AT_encoding.to_string(), DW_AT_byte_size.to_string(),].join(", ")
                 )
-                    .attach_printable(format!("Got: encoding={}, bytes={}", encoding.to_string(), byte_size));
-            }
+            )
+            .attach_printable(format!(
+                "Got: encoding={}, bytes={}",
+                encoding.to_string(),
+                byte_size
+            ));
         }
     }
-
-//
-// fn process_node(
-//     node: EntriesTreeNode<EndianSlice<gimli::LittleEndian>>,
-//     unit: &gimli::Unit<gimli::EndianSlice<gimli::LittleEndian>>,
-//     dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>,
-//     addr_map: &mut BTreeMap<u64, String>,
-// ) {
-//     let entry = node.entry();
-//     process_entry(entry, unit, dwarf, addr_map, None);
-//     let mut children = node.children();
-//     while let Some(child) = children.next().unwrap() {
-//         process_node(child, unit, dwarf, addr_map);
-//     }
-// }
-//
-// fn process_entry(
-//     entry: &DebuggingInformationEntry<EndianSlice<gimli::LittleEndian>>,
-//     unit: &gimli::Unit<gimli::EndianSlice<gimli::LittleEndian>>,
-//     dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>,
-//     addr_map: &mut BTreeMap<u64, String>,
-//     input_addr: Option<u64>,
-// ) {
-//     let tag = entry.tag();
-//     if tag != DW_TAG_subprogram {
-//         return;
-//     }
-//     if let Some(linkage_name) = entry.attr_value(gimli::DW_AT_linkage_name).unwrap() {
-//         let linkage_name = dwarf
-//             .attr_string(&unit, linkage_name)
-//             .unwrap()
-//             .to_string()
-//             .unwrap();
-//         let addr = match entry.attr_value(gimli::DW_AT_low_pc).unwrap() {
-//             Some(x) => {
-//                 let x = dwarf.attr_address(&unit, x).unwrap().unwrap();
-//                 if let Some(y) = input_addr {
-//                     if x != y {
-//                         panic!("{} 0x{:x} != 0x{:x}", linkage_name, x, y);
-//                     }
-//                 }
-//                 x
-//             }
-//             None => {
-//                 if let Some(y) = input_addr {
-//                     y
-//                 } else {
-//                     // skip
-//                     return;
-//                 }
-//             }
-//         };
-//         if addr != 0 {
-//             if let Some(old_name) = addr_map.insert(addr, linkage_name.to_string()) {
-//                 if old_name != linkage_name {
-//                     panic!("Conflict: 0x{:x} {} {}", addr, old_name, linkage_name);
-//                 }
-//             }
-//         }
-//         return;
-//     }
-//     // find abstract_origin
-//     if let Some(abstract_origin) = entry.attr_value(gimli::DW_AT_abstract_origin).unwrap() {
-//         let offset = match abstract_origin {
-//             AttributeValue::UnitRef(offset) => offset,
-//             _ => panic!("Invalid abstract_origin"),
-//         };
-//         let abstract_origin = unit.entry(offset).unwrap();
-//         let addr = entry
-//             .attr_value(gimli::DW_AT_low_pc)
-//             .unwrap()
-//             .map(|x| dwarf.attr_address(&unit, x).unwrap().unwrap());
-//         process_entry(&abstract_origin, unit, dwarf, addr_map, addr);
-//         return;
-//     }
-//     if let Some(specification) = entry.attr_value(gimli::DW_AT_specification).unwrap() {
-//         let offset = match specification {
-//             AttributeValue::UnitRef(offset) => offset,
-//             _ => panic!("Invalid specification"),
-//         };
-//         let specification = unit.entry(offset).unwrap();
-//         let addr = entry
-//             .attr_value(gimli::DW_AT_low_pc)
-//             .unwrap()
-//             .map(|x| dwarf.attr_address(&unit, x).unwrap().unwrap());
-//         process_entry(&specification, unit, dwarf, addr_map, addr);
-//         return;
-//     }
-//     // if let Some(name) = entry.attr_value(gimli::DW_AT_name).unwrap() {
-//     //     // let name = dwarf.attr_string(&unit, name).unwrap().to_string().unwrap();
-//     //     // println!("skipping {}", name);
-//     //     return;
-//     // }
-//     // let mut attrs = entry.attrs();
-//     // while let Some(a) = attrs.next().unwrap() {
-//     //     println!("{}", a.name());
-//     // }
-//     // let offset = entry.offset().0;
-//     // panic!("No linkage_name for {:?} {offset:x}", entry);
-// }
+}

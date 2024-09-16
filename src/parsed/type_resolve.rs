@@ -1,37 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{Arc, RwLock};
 
 use itertools::Itertools;
-use threadpool::ThreadPool;
 
-use super::{TypeInfo, TypeName, TypeComp};
+use error_stack::{report, Result, ResultExt};
+
+use super::{Error, NamespaceMap, TypeComp, TypeInfo, TypeName};
 
 use crate::util::ProgressPrinter;
 use crate::worker::Pool;
-
-/// A resolver expression
-pub enum Expr {
-    /// 2 types are equivalent
-    Equiv(usize, usize),
-    /// If 2 is equiv to 3 then 0 is equiv to 1
-    IfEquivThenEquiv(usize, usize, usize, usize),
-    /// If all (a, b) pairs are equivalent, then a and b are equivalent
-    IfAllEquivThenEquiv(usize, usize, Vec<(usize, usize)>),
-}
-struct PrintType<'a>(usize, &'a TypeResolver);
-impl<'a> std::fmt::Display for PrintType<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let bucket = self.1.offset_to_bucket.get(&self.0).unwrap();
-        let ty = self.1.offset_to_type.get(&bucket).unwrap();
-        write!(f, "{}", ty)
-    }
-}
 
 struct InputIter {
     keys: Vec<usize>,
     a: usize,
     b: usize,
-    chunk_size: usize
+    chunk_size: usize,
 }
 impl InputIter {
     fn new(keys: Vec<usize>, chunk_size: usize) -> Self {
@@ -39,29 +22,28 @@ impl InputIter {
             keys,
             a: 0,
             b: 1,
-            chunk_size
+            chunk_size,
         }
     }
     fn total(&self) -> usize {
         let l = match self.keys.len() {
             0 => 0,
-            n => n * (n - 1) / 2
+            n => n * (n - 1) / 2,
         };
         l
     }
     fn next_single(&mut self) -> Option<(usize, usize)> {
         let len = self.keys.len();
-        self.b+= 1;
-        if self.b>= len {
-            self.a+= 1;
-            self.b= self.a+ 1;
+        self.b += 1;
+        if self.b >= len {
+            self.a += 1;
+            self.b = self.a + 1;
         }
-        if self.a>= len || self.b>= len {
+        if self.a >= len || self.b >= len {
             return None;
         }
         Some((self.keys[self.a], self.keys[self.b]))
     }
-    
 }
 impl Iterator for InputIter {
     type Item = Vec<(usize, usize)>;
@@ -81,40 +63,16 @@ impl Iterator for InputIter {
     }
 }
 
-
 pub struct TypeResolver {
-    pub offset_to_type: BTreeMap<usize, TypeInfo>,
-    pub offset_to_bucket: BTreeMap<usize, usize>,
-    pub bucket_to_offsets: BTreeMap<usize, Vec<usize>>,
+    offset_to_type: BTreeMap<usize, TypeInfo>,
+    offset_to_bucket: BTreeMap<usize, usize>,
+    bucket_to_offsets: BTreeMap<usize, Vec<usize>>,
 }
 
 impl TypeResolver {
     pub fn new(offset_to_type: BTreeMap<usize, TypeInfo>) -> Self {
         let offset_to_bucket = offset_to_type.keys().map(|k| (*k, *k)).collect();
         let bucket_to_offsets = offset_to_type.keys().map(|k| (*k, vec![*k])).collect();
-        // let bucket_to_name = offset_to_type
-        //     .iter()
-        //     .map(|(k, v)| {
-        //         let v = match v {
-        //             TypeInfo::Prim(t) => TypeName::Prim(*t),
-        //             TypeInfo::Typedef(name, _) => TypeName::Name(name.clone()),
-        //             TypeInfo::Struct(x) => match &x.name {
-        //                 Some(name) => TypeName::Name(name.clone()),
-        //                 None => TypeName::Anon(*k),
-        //             },
-        //             TypeInfo::Enum(x) => match &x.name {
-        //                 Some(name) => TypeName::Name(name.clone()),
-        //                 None => TypeName::Anon(*k),
-        //             },
-        //             TypeInfo::Union(x) => match &x.name {
-        //                 Some(name) => TypeName::Name(name.clone()),
-        //                 None => TypeName::Anon(*k),
-        //             },
-        //             TypeInfo::Comp(x) => TypeName::Compound(x.clone()),
-        //         };
-        //         (*k, v)
-        //     })
-        //     .collect::<HashMap<_,_>>();
         Self {
             offset_to_bucket,
             offset_to_type,
@@ -132,7 +90,7 @@ impl TypeResolver {
             }
         }
         progress.done();
-        for (a,b) in typedefs {
+        for (a, b) in typedefs {
             self.merge(a, b);
         }
     }
@@ -142,50 +100,71 @@ impl TypeResolver {
     }
 
     pub fn merge_primitives(s: &Arc<RwLock<Self>>) {
-        Self::merge_by_filter(s, |x| {
-            let s = s.read().unwrap();
-            let ty = s.offset_to_type.get(&x).unwrap();
-            matches!(ty, TypeInfo::Prim(_))
-        }, "Deduplicate primitives");
+        Self::merge_by_filter(
+            s,
+            |x| {
+                let s = s.read().unwrap();
+                let ty = s.offset_to_type.get(&x).unwrap();
+                matches!(ty, TypeInfo::Prim(_))
+            },
+            "Deduplicate primitives",
+        );
     }
 
     pub fn merge_structs(s: &Arc<RwLock<Self>>) {
-        Self::merge_by_filter(s, |x| {
-            let s = s.read().unwrap();
-            let ty = s.offset_to_type.get(&x).unwrap();
-            matches!(ty, TypeInfo::Struct(_))
-        }, "Deduplicate structs");
+        Self::merge_by_filter(
+            s,
+            |x| {
+                let s = s.read().unwrap();
+                let ty = s.offset_to_type.get(&x).unwrap();
+                matches!(ty, TypeInfo::Struct(_))
+            },
+            "Deduplicate structs",
+        );
     }
 
     pub fn merge_enums(s: &Arc<RwLock<Self>>) {
-        Self::merge_by_filter(s, |x| {
-            let s = s.read().unwrap();
-            let ty = s.offset_to_type.get(&x).unwrap();
-            matches!(ty, TypeInfo::Enum(_))
-        }, "Deduplicate enums");
+        Self::merge_by_filter(
+            s,
+            |x| {
+                let s = s.read().unwrap();
+                let ty = s.offset_to_type.get(&x).unwrap();
+                matches!(ty, TypeInfo::Enum(_))
+            },
+            "Deduplicate enums",
+        );
     }
 
     pub fn merge_unions(s: &Arc<RwLock<Self>>) {
-        Self::merge_by_filter(s, |x| {
-            let s = s.read().unwrap();
-            let ty = s.offset_to_type.get(&x).unwrap();
-            matches!(ty, TypeInfo::Union(_))
-        }, "Deduplicate unions");
+        Self::merge_by_filter(
+            s,
+            |x| {
+                let s = s.read().unwrap();
+                let ty = s.offset_to_type.get(&x).unwrap();
+                matches!(ty, TypeInfo::Union(_))
+            },
+            "Deduplicate unions",
+        );
     }
 
     pub fn merge_pointers(s: &Arc<RwLock<Self>>) {
-        Self::merge_by_filter(s, |x| {
-            let s = s.read().unwrap();
-            let ty = s.offset_to_type.get(&x).unwrap();
-            matches!(ty, TypeInfo::Comp(TypeComp::Ptr(_)))
-        }, "Deduplicate pointer types");
+        Self::merge_by_filter(
+            s,
+            |x| {
+                let s = s.read().unwrap();
+                let ty = s.offset_to_type.get(&x).unwrap();
+                matches!(ty, TypeInfo::Comp(TypeComp::Ptr(_)))
+            },
+            "Deduplicate pointer types",
+        );
     }
 
     pub fn merge_pass2(s: &Arc<RwLock<Self>>) {
         Self::merge_by_filter(s, |_| true, "Deduplicate types pass 2");
     }
 
-    pub fn merge_pass_by_filter(s: &Arc<RwLock<Self>>,
+    fn merge_pass_by_filter(
+        s: &Arc<RwLock<Self>>,
         window: usize,
         threshold: f64,
         filter: impl Fn(usize) -> bool,
@@ -222,7 +201,10 @@ impl TypeResolver {
             }
             progress.reset_timer();
             progress.set_total(merge_sets.len());
-            progress.set_prefix(format!("{msg} (iteration {}), merging {total} types", iteration));
+            progress.set_prefix(format!(
+                "{msg} (iteration {}), merging {total} types",
+                iteration
+            ));
             {
                 let mut s = s.write().unwrap();
                 for (i, merge_set) in merge_sets.into_iter().enumerate() {
@@ -242,10 +224,7 @@ impl TypeResolver {
         progress.done();
     }
 
-
-    pub fn merge_by_filter(s: &Arc<RwLock<Self>>,
-        f: impl Fn(usize) -> bool,
-        msg: &str) {
+    fn merge_by_filter(s: &Arc<RwLock<Self>>, f: impl Fn(usize) -> bool, msg: &str) {
         let mut last_keys_len = 0;
         let mut progress = ProgressPrinter::new(0, msg);
         for iteration in 1.. {
@@ -291,167 +270,204 @@ impl TypeResolver {
         progress.done();
     }
 
-    pub fn resolve_names(&self) -> BTreeMap<usize, TypeName> {
-        let base_names = self.get_base_names();
+    fn filtered_buckets(&self, f: impl Fn(usize) -> bool) -> BTreeSet<usize> {
+        self.bucket_to_offsets
+            .keys()
+            .filter(|x| f(**x))
+            .copied()
+            .collect()
+    }
+
+    pub fn resolve_names(
+        &self,
+        namespaces: &NamespaceMap,
+    ) -> Result<BTreeMap<usize, TypeName>, Error> {
+        let base_names = self
+            .offset_to_type
+            .iter()
+            .filter_map(|(offset, ty)| {
+                let r = match ty {
+                    TypeInfo::Prim(t) => Ok(TypeName::Prim(*t)),
+                    TypeInfo::Typedef(name, _) => Ok(TypeName::Name(name.clone())),
+                    TypeInfo::Struct(x) => match &x.name {
+                        Some(name) => Ok(TypeName::Name(name.clone())),
+                        None => TypeName::anonymous_struct(*offset, namespaces),
+                    },
+                    TypeInfo::Enum(x) => match &x.name {
+                        Some(name) => Ok(TypeName::Name(name.clone())),
+                        None => TypeName::anonymous_enum(*offset, namespaces),
+                    },
+                    TypeInfo::Union(x) => match &x.name {
+                        Some(name) => Ok(TypeName::Name(name.clone())),
+                        None => TypeName::anonymous_union(*offset, namespaces),
+                    },
+                    _ => return None,
+                };
+                Some(r.map(|x| (*offset, x)))
+            })
+            .collect::<Result<BTreeMap<usize, TypeName>, Error>>()
+            .change_context(Error::ResolveName)?;
         let total_buckets = self.bucket_to_offsets.len();
         let mut bucket_to_name = BTreeMap::<usize, TypeName>::new();
+        #[cfg(feature = "debug-resolve-name")]
         let mut bucket_to_name_str = BTreeMap::<usize, HashSet<String>>::new();
-        let mut last_len = 0;
         let progress = ProgressPrinter::new(total_buckets, "Resolve names");
         loop {
             if bucket_to_name.len() == total_buckets {
                 break;
             }
-            if last_len != 0 && last_len == bucket_to_name.len() {
-                break;
-            }
-            last_len = bucket_to_name.len();
-            // eprintln!("resolved {}/{}", bucket_to_name.len(), total_buckets);
+            let last_len = bucket_to_name.len();
             'outer: for (bucket, offsets) in &self.bucket_to_offsets {
                 if bucket_to_name.contains_key(bucket) {
                     // already resolved
                     continue;
                 }
-                let mut best_offset = None;
                 let mut best_name = None;
+                #[cfg(feature = "debug-resolve-name")]
                 let mut all_names = HashSet::new();
                 for offset in offsets {
-                    let name = match base_names.get(offset) {
-                        Some(name) => name.clone(),
-                        None => {
-                            let bucket = self.offset_to_bucket.get(offset).unwrap();
-                            match bucket_to_name.get(bucket) {
-                                Some(name) => name.clone(),
-                                None => {
-                                    let ty = self.offset_to_type.get(offset).unwrap();
-                                    match ty {
+                    // is this offset a base type (struct/enum/union/typedef?)
+                    let name: Result<Option<TypeName>, Error> = base_names
+                        .get(offset)
+                        .cloned()
+                        .map(|x| Ok(Some(x)))
+                        .unwrap_or_else(|| {
+                            // if not, is this bucket already resolved?
+                            let bucket = self.get_bucket(*offset)?;
+                            // if not resolved, can we resolve it?
+                            bucket_to_name
+                                .get(&bucket)
+                                .cloned()
+                                .map(|x| Ok(Some(x)))
+                                .unwrap_or_else(|| {
+                                    let r = match self.get_info(*offset)? {
                                         TypeInfo::Prim(t) => TypeName::Prim(*t),
-                                        TypeInfo::Typedef(name, _) => TypeName::Name(name.clone()),
                                         TypeInfo::Struct(x) => match &x.name {
                                             Some(name) => TypeName::Name(name.clone()),
-                                            None => TypeName::Anon(*offset, "struct"),
+                                            None => {
+                                                TypeName::anonymous_struct(*offset, namespaces)?
+                                            }
                                         },
                                         TypeInfo::Enum(x) => match &x.name {
                                             Some(name) => TypeName::Name(name.clone()),
-                                            None => TypeName::Anon(*offset, "enum"),
+                                            None => TypeName::anonymous_enum(*offset, namespaces)?,
                                         },
                                         TypeInfo::Union(x) => match &x.name {
                                             Some(name) => TypeName::Name(name.clone()),
-                                            None => TypeName::Anon(*offset, "union"),
+                                            None => TypeName::anonymous_union(*offset, namespaces)?,
                                         },
+                                        TypeInfo::Typedef(name, _) => TypeName::Name(name.clone()),
+                                        // composite types are only resolvable if
+                                        // their components are resolvable
                                         TypeInfo::Comp(TypeComp::Ptr(x)) => {
-                                            let bucket = self.offset_to_bucket.get(x).unwrap();
-                                            let name = match bucket_to_name.get(bucket) {
-                                                Some(name) => name.clone(),
-                                                None => {
-                                                    // can't resolve yet
-                                                    continue 'outer;
-                                                }
-                                            };
-                                            TypeName::Comp(Box::new(TypeComp::Ptr(name)))
+                                            let bucket = self.get_bucket(*x)?;
+                                            match bucket_to_name.get(&bucket) {
+                                                Some(name) => TypeName::pointer(name.clone()),
+                                                None => return Ok(None),
+                                            }
                                         }
-                                        TypeInfo::Comp(TypeComp::Array(x, len)) => {
-                                            let bucket = self.offset_to_bucket.get(x).unwrap();
-                                            let name = match bucket_to_name.get(bucket) {
-                                                Some(name) => name.clone(),
-                                                None => {
-                                                    // can't resolve yet
-                                                    continue 'outer;
-                                                }
-                                            };
-                                            TypeName::Comp(Box::new(TypeComp::Array(name, *len)))
+                                        TypeInfo::Comp(TypeComp::Array(x, l)) => {
+                                            let bucket = self.get_bucket(*x)?;
+                                            match bucket_to_name.get(&bucket) {
+                                                Some(name) => TypeName::array(name.clone(), *l),
+                                                None => return Ok(None),
+                                            }
                                         }
                                         TypeInfo::Comp(TypeComp::Subroutine(r, p)) => {
-                                            let bucket = self.offset_to_bucket.get(r).unwrap();
-                                            let r_name = match bucket_to_name.get(bucket) {
+                                            let bucket = self.get_bucket(*r)?;
+                                            let r_name = match bucket_to_name.get(&bucket) {
                                                 Some(name) => name.clone(),
-                                                None => {
-                                                    // can't resolve yet
-                                                    continue 'outer;
-                                                }
+                                                None => return Ok(None),
                                             };
-                                            let mut p_names = Vec::new();
+                                            let mut p_names = Vec::with_capacity(p.len());
                                             for p_off in p {
-                                                let p_bucket = self.offset_to_bucket.get(p_off).unwrap();
-                                                let p_name = match bucket_to_name.get(p_bucket) {
+                                                let p_bucket = self.get_bucket(*p_off)?;
+                                                let p_name = match bucket_to_name.get(&p_bucket) {
                                                     Some(name) => name.clone(),
-                                                    None => {
-                                                        // can't resolve yet
-                                                        continue 'outer;
-                                                    }
+                                                    None => return Ok(None),
                                                 };
                                                 p_names.push(p_name);
                                             }
-                                            
-                                            TypeName::Comp(Box::new(TypeComp::Subroutine(r_name, p_names)))
+
+                                            TypeName::Comp(Box::new(TypeComp::Subroutine(
+                                                r_name, p_names,
+                                            )))
                                         }
                                         TypeInfo::Comp(TypeComp::Ptmf(t, r, p)) => {
-                                            let bucket = self.offset_to_bucket.get(t).unwrap();
-                                            let t_name = match bucket_to_name.get(bucket) {
+                                            let bucket = self.get_bucket(*t)?;
+                                            let t_name = match bucket_to_name.get(&bucket) {
                                                 Some(name) => name.clone(),
-                                                None => {
-                                                    // can't resolve yet
-                                                    continue 'outer;
-                                                }
+                                                None => return Ok(None),
                                             };
-                                            let bucket = self.offset_to_bucket.get(r).unwrap();
-                                            let r_name = match bucket_to_name.get(bucket) {
+                                            let bucket = self.get_bucket(*r)?;
+                                            let r_name = match bucket_to_name.get(&bucket) {
                                                 Some(name) => name.clone(),
-                                                None => {
-                                                    // can't resolve yet
-                                                    continue 'outer;
-                                                }
+                                                None => return Ok(None),
                                             };
-                                            let mut p_names = Vec::new();
+                                            let mut p_names = Vec::with_capacity(p.len());
                                             for p_off in p {
-                                                let p_bucket = self.offset_to_bucket.get(p_off).unwrap();
-                                                let p_name = match bucket_to_name.get(p_bucket) {
+                                                let p_bucket = self.get_bucket(*p_off)?;
+                                                let p_name = match bucket_to_name.get(&p_bucket) {
                                                     Some(name) => name.clone(),
-                                                    None => {
-                                                        // can't resolve yet
-                                                        continue 'outer;
-                                                    }
+                                                    None => return Ok(None),
                                                 };
                                                 p_names.push(p_name);
                                             }
-                                            
-                                            TypeName::Comp(Box::new(TypeComp::Ptmf(t_name, r_name, p_names)))
+
+                                            TypeName::Comp(Box::new(TypeComp::Ptmf(
+                                                t_name, r_name, p_names,
+                                            )))
                                         }
-                                    }
-                                }
-                            }
-                        }
+                                    };
+                                    Ok(Some(r))
+                                })
+                        });
+                    let name = match name? {
+                        Some(name) => name,
+                        None => continue 'outer,
                     };
-                    let name_str = name.to_string();
-                    if !name_str.starts_with("anon_0x") {
-                        all_names.insert(name_str);
+
+                    #[cfg(feature = "debug-resolve-name")]
+                    {
+                        let name_str = name.to_string();
+                        if !name_str.starts_with("anon_0x") {
+                            all_names.insert(name_str);
+                        }
                     }
-                    match (&mut best_offset, &mut best_name) {
-                        (Some(o), Some(n)) => {
+                    match &mut best_name {
+                        Some(n) => {
                             if name.is_preferred_over(&n) == std::cmp::Ordering::Greater {
-                                best_offset = Some(offset);
+                                // best_offset = Some(offset);
                                 best_name = Some(name.clone());
                             }
                         }
-                        (None, None) => {
-                            best_offset = Some(offset);
+                        None => {
+                            // best_offset = Some(offset);
                             best_name = Some(name.clone());
                         }
-                        _ => {}
                     }
                 }
-                let name_str = best_name.as_ref().unwrap().to_string();
-                bucket_to_name.insert(*bucket, best_name.unwrap());
-                progress.print(bucket_to_name.len(), &name_str);
+                let name = best_name
+                    .ok_or_else(|| report!(Error::ResolveName))
+                    .attach_printable_lazy(|| {
+                        format!("Unexpected empty bucket: 0x{:08x}", bucket)
+                    })?;
+                progress.print(bucket_to_name.len(), &name.to_string());
+                bucket_to_name.insert(*bucket, name);
+                #[cfg(feature = "debug-resolve-name")]
                 if let Some(names) = bucket_to_name_str.get_mut(bucket) {
                     names.extend(all_names);
                 } else {
                     bucket_to_name_str.insert(*bucket, all_names);
                 }
             }
+            if last_len == bucket_to_name.len() {
+                break;
+            }
         }
         progress.done();
-        for (bucket, name) in &bucket_to_name{
+        #[cfg(feature = "debug-resolve-name")]
+        for (bucket, name) in &bucket_to_name {
             let n = name.to_string();
             println!("0x{:08x}: {}", bucket, n);
             if !name.is_primitive() {
@@ -462,76 +478,56 @@ impl TypeResolver {
                 }
             }
         }
+        #[cfg(feature = "debug-resolve-name")]
+        let mut resolved = true;
         for bucket in self.bucket_to_offsets.keys() {
             if !bucket_to_name.contains_key(bucket) {
-                panic!("0x{:08x}: <unresolved>", bucket);
+                #[cfg(feature = "debug-resolve-name")]
+                {
+                    resolved = false;
+                    println!("0x{:08x}: <unresolved>", bucket);
+                }
+                #[cfg(not(feature = "debug-resolve-name"))]
+                {
+                    return Err(report!(Error::ResolveName)).attach_printable(
+                        "There are unresolved names. Run with --features debug-resolve-name",
+                    );
+                }
             }
         }
-        bucket_to_name
-    }
-
-    pub fn get_base_names(&self) -> BTreeMap<usize, TypeName> {
-        let mut names = BTreeMap::new();
-        for (offset, ty) in &self.offset_to_type {
-            let name = match ty {
-                TypeInfo::Prim(t) => TypeName::Prim(*t),
-                TypeInfo::Typedef(name, _) => TypeName::Name(name.clone()),
-                TypeInfo::Struct(x) => match &x.name {
-                    Some(name) => TypeName::Name(name.clone()),
-                    None => TypeName::Anon(*offset, "struct"),
-                },
-                TypeInfo::Enum(x) => match &x.name {
-                    Some(name) => TypeName::Name(name.clone()),
-                    None => TypeName::Anon(*offset, "enum"),
-                },
-                TypeInfo::Union(x) => match &x.name {
-                    Some(name) => TypeName::Name(name.clone()),
-                    None => TypeName::Anon(*offset, "union"),
-                },
-                _ => continue,
-                // TypeInfo::Comp(c) => {
-                //     if !include_comp {
-                //         continue;
-                //     }
-                //     match c {
-                //         TypeInfo::Comp(TypeComp::Ptr(x)) => {
-                //             TypeName::Comp(TypeComp::Ptr(*self.offset_to_bucket.get(x).unwrap()))
-                //         }
-                //         TypeInfo::Comp(TypeComp::Array(x, y)) => {
-                //             TypeName::Comp(TypeComp::Array(*self.offset_to_bucket.get(x).unwrap(), *y))
-                //         }
-                //         TypeInfo::Comp(TypeComp::Subroutine(x, y)) => {
-                //             let x = *self.offset_to_bucket.get(x).unwrap();
-                //             let y = y.iter().map(|x| *self.offset_to_bucket.get(x).unwrap()).collect();
-                //             TypeName::Comp(TypeComp::Subroutine(x, y))
-                //         }
-                //         TypeInfo::Comp(TypeComp::Ptmf(x, y, z)) => {
-                //             let x = *self.offset_to_bucket.get(x).unwrap();
-                //             let y = *self.offset_to_bucket.get(y).unwrap();
-                //             let z = z.iter().map(|x| *self.offset_to_bucket.get(x).unwrap()).collect();
-                //             TypeName::Comp(TypeComp::Ptmf(x, y, z))
-                //         }
-                //     }
-                // }
-            };
-            names.insert(*offset, name);
+        #[cfg(feature = "debug-resolve-name")]
+        if !resolved {
+            return Err(report!(Error::ResolveName))
+                .attach_printable("Not all names are resolved.");
         }
-        names
+        Ok(bucket_to_name)
     }
 
-    pub fn filtered_buckets(&self, f: impl Fn(usize) -> bool) -> BTreeSet<usize> {
-        self.bucket_to_offsets.keys().filter(|x| f(**x)).copied().collect()
+    pub fn get_bucket(&self, offset: usize) -> Result<usize, Error> {
+        self.offset_to_bucket
+            .get(&offset)
+            .copied()
+            .ok_or(Error::UnlinkedType(offset))
+            .attach_printable_lazy(|| format!("While getting bucket for offset: 0x{:08x}", offset))
     }
 
-    // pub fn get_bucket(&self, offset: usize) -> usize {
-    //     let bucket = self.offset_to_bucket.get(&offset).unwrap();
-    //     match self.merging_old_to_new_buckets.get(bucket) {
-    //         Some(new_bucket) => *new_bucket,
-    //         None => *bucket,
-    //     }
-    // }
+    pub fn get_info(&self, offset: usize) -> Result<&TypeInfo, Error> {
+        self.offset_to_type
+            .get(&offset)
+            .ok_or(Error::UnlinkedType(offset))
+            .attach_printable_lazy(|| {
+                format!("While getting type info for offset: 0x{:08x}", offset)
+            })
+    }
+
+    pub fn get_bucket_offsets(&self, bucket: usize) -> Result<&Vec<usize>, Error> {
+        self.bucket_to_offsets
+            .get(&bucket)
+            .ok_or(Error::UnlinkedType(bucket))
+            .attach_printable_lazy(|| format!("While getting offsets for bucket: 0x{:08x}", bucket))
+    }
     //
-    pub fn find_mergeable(&self, inputs: &Vec<usize>) -> Vec<Vec<usize>> {
+    fn find_mergeable(&self, inputs: &Vec<usize>) -> Vec<Vec<usize>> {
         let mut merge_sets = Vec::new();
         for (i, a) in inputs.iter().enumerate() {
             let a = *a;
@@ -551,7 +547,7 @@ impl TypeResolver {
         }
         merge_sets
     }
-    pub fn find_mergeable2(&self, inputs: &Vec<(usize, usize)>) -> BTreeMap<usize, Vec<usize>> {
+    fn find_mergeable2(&self, inputs: &Vec<(usize, usize)>) -> BTreeMap<usize, Vec<usize>> {
         let mut merge_sets = BTreeMap::new();
         for (a, b) in inputs {
             let a = *a;
@@ -567,14 +563,14 @@ impl TypeResolver {
         merge_sets
     }
 
-    pub fn complete_vtables(&mut self) {
+    pub fn complete_vtables(&mut self) -> Result<(), Error> {
         let progress = ProgressPrinter::new(self.bucket_to_offsets.len(), "Merge vtables");
 
         for (i, offsets) in self.bucket_to_offsets.values().enumerate() {
             progress.print(i, "");
             let mut vtable = Vec::new();
             for offset in offsets {
-                let ty = self.offset_to_type.get(offset).unwrap();
+                let ty = self.get_info(*offset)?;
                 if let TypeInfo::Struct(s) = ty {
                     if s.vtable.len() > vtable.len() {
                         for i in vtable.len()..s.vtable.len() {
@@ -584,6 +580,7 @@ impl TypeResolver {
                 }
             }
             for offset in offsets {
+                // unwrap: should return err above if offset is not in the map
                 let ty = self.offset_to_type.get_mut(offset).unwrap();
                 if let TypeInfo::Struct(s) = ty {
                     s.vtable = vtable.clone();
@@ -591,145 +588,8 @@ impl TypeResolver {
             }
         }
         progress.done();
+        Ok(())
     }
-
-
-    // pub fn eval_all_exprs(s: &Arc<RwLock<Self>>, pool: &ThreadPool, exprs: &mut Vec<Expr>) {
-    //     let mut progress = ProgressPrinter::new(0, "Deduplicating types");
-    //     loop {
-    //         let results = TypeResolver::eval_exprs(s, &pool, &mut progress, exprs);
-    //         if results.is_empty() {
-    //             break s;
-    //         }
-    //         {
-    //             s.write().unwrap().merge_all(&results, &mut progress);
-    //         }
-    //     };
-    //     progress.done();
-    // }
-
-    // pub fn merge_simple_types(s: &Arc<RwLock<Self>>, pool: &ThreadPool, all: bool) {
-    //     let mut exprs = Vec::new();
-    //     let prim_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Prim(_) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, prim_keys, "Analyzing primitives"));
-    //     let struct_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Struct(_) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, struct_keys, "Analyzing structs"));
-    //     let union_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Union(_) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, union_keys, "Analyzing unions"));
-    //     let enum_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Enum(_) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, enum_keys, "Analyzing enums"));
-    //     if all {
-    //     // let ptr_keys = {
-    //     //     let s2 = s.read().unwrap();
-    //     //     s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //     //         if let TypeInfo::Comp(TypeComp::Ptr(_)) = ty {
-    //     //             Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //     //         } else {
-    //     //             None
-    //     //         }
-    //     //     }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     // };
-    //     // exprs.extend(Self::make_exprs_by_keys(s, pool, ptr_keys, "Analyzing pointer types"));
-    //     let array_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Comp(TypeComp::Array(_, _)) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, array_keys, "Analyzing array types"));
-    //     let subroutine_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Comp(TypeComp::Subroutine(_, _)) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, subroutine_keys, "Analyzing subroutine types"));
-    //     let ptmf_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Comp(TypeComp::Ptmf(_, _, _)) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     exprs.extend(Self::make_exprs_by_keys(s, pool, ptmf_keys, "Analyzing ptr-to-member-function types"));
-    //     }
-    //     Self::eval_all_exprs(s, pool, &mut exprs);
-    // }
-
-    // pub fn merge_pointers(s: &Arc<RwLock<Self>>, pool: &ThreadPool) {
-    //     let ptr_keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.offset_to_type.iter().filter_map(|(offset, ty)| {
-    //             if let TypeInfo::Comp(TypeComp::Ptr(_)) = ty {
-    //                 Some(*s2.offset_to_bucket.get(offset).unwrap())
-    //             } else {
-    //                 None
-    //             }
-    //         }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-    //     };
-    //     let merge_sets = s.read().unwrap().find_mergeable_progress(&ptr_keys, "Deduplicating pointers");
-    //     for merge_set in merge_sets {
-    //         s.write().unwrap().merge_set(&merge_set);
-    //     }
-    // }
-    // pub fn merge_all_types(s: &Arc<RwLock<Self>>, pool: &ThreadPool) {
-    //     let keys = {
-    //         let s2 = s.read().unwrap();
-    //         s2.bucket_to_offsets.keys().copied().collect::<Vec<_>>()
-    //     };
-    //     let merge_sets = s.read().unwrap().find_mergeable_progress(&keys, "Deduplicating all types");
-    //     for merge_set in merge_sets {
-    //         s.write().unwrap().merge_set(&merge_set);
-    //     }
-    // }
-
 
     fn needs_merging(&self, a_offset: usize, b_offset: usize) -> bool {
         let a_bucket = self.offset_to_bucket.get(&a_offset).unwrap();
@@ -744,7 +604,12 @@ impl TypeResolver {
     /// Perform high-level merge checks
     ///
     /// Struct and union member types are not checked
-    fn are_equiv(&self, a_offset: usize, b_offset: usize, memo: &mut HashSet<(usize, usize)>) -> bool {
+    fn are_equiv(
+        &self,
+        a_offset: usize,
+        b_offset: usize,
+        memo: &mut HashSet<(usize, usize)>,
+    ) -> bool {
         if a_offset > b_offset {
             return self.are_equiv(b_offset, a_offset, memo);
         }
@@ -762,9 +627,7 @@ impl TypeResolver {
         let b_ty = self.offset_to_type.get(&b_offset).unwrap();
         let result = match (a_ty, b_ty) {
             // note: typedefs are added in make_expr_typedef
-            (TypeInfo::Prim(a_prim), TypeInfo::Prim(b_prim)) => {
-                a_prim == b_prim
-            }
+            (TypeInfo::Prim(a_prim), TypeInfo::Prim(b_prim)) => a_prim == b_prim,
             (TypeInfo::Struct(a_struct), TypeInfo::Struct(b_struct)) => {
                 if a_struct.is_decl || b_struct.is_decl {
                     return a_struct.name == b_struct.name;
@@ -777,26 +640,30 @@ impl TypeResolver {
                     false
                 } else {
                     match (&a_struct.name, &b_struct.name) {
-                        (Some(a_name), Some(b_name))if a_name != b_name => {
+                        (Some(a_name), Some(b_name)) if a_name != b_name => {
                             // if both A and B are named, they must be the same name to be considered
                             // equivalent, otherwise non-related types with the same layout will be
                             // merged
                             false
-                        },
+                        }
                         _ => {
-                    // since vtable could be incomplete, we need to check the names
-                    // instead of relying on the length
-                    for (a_name, b_name) in a_struct.vtable.iter().zip(b_struct.vtable.iter()) {
-                        if a_name.starts_with('~') && b_name.starts_with('~') {
-                            // dtor names might be different, it's ok
-                            continue;
-                        }
-                        if a_name != b_name {
-                            return false;
-                        }
-                    }
+                            // since vtable could be incomplete, we need to check the names
+                            // instead of relying on the length
+                            for (a_name, b_name) in
+                                a_struct.vtable.iter().zip(b_struct.vtable.iter())
+                            {
+                                if a_name.starts_with('~') && b_name.starts_with('~') {
+                                    // dtor names might be different, it's ok
+                                    continue;
+                                }
+                                if a_name != b_name {
+                                    return false;
+                                }
+                            }
                             let mut r = true;
-                            for (a_member, b_member) in a_struct.members.iter().zip(b_struct.members.iter()) {
+                            for (a_member, b_member) in
+                                a_struct.members.iter().zip(b_struct.members.iter())
+                            {
                                 match (&a_member.name, &b_member.name) {
                                     (Some(a_name), Some(b_name)) => {
                                         if a_name != b_name {
@@ -866,10 +733,11 @@ impl TypeResolver {
                     false
                 } else if a_enum.enumerators.len() != b_enum.enumerators.len() {
                     // number of enumerators must match
-                     false
+                    false
                 } else {
                     let mut r = true;
-                    for (a_enumerator, b_enumerator) in a_enum.enumerators.iter().zip(b_enum.enumerators.iter())
+                    for (a_enumerator, b_enumerator) in
+                        a_enum.enumerators.iter().zip(b_enum.enumerators.iter())
                     {
                         // names matter for the enumerators, otherwise unrelated enums with the
                         // same values will be merged
@@ -886,7 +754,10 @@ impl TypeResolver {
                 let b_bucket = self.offset_to_bucket.get(b_ptr).unwrap();
                 self.are_equiv(*a_bucket, *b_bucket, memo)
             }
-            (TypeInfo::Comp(TypeComp::Array(a_t, a_count)), TypeInfo::Comp(TypeComp::Array(b_t, b_count))) => {
+            (
+                TypeInfo::Comp(TypeComp::Array(a_t, a_count)),
+                TypeInfo::Comp(TypeComp::Array(b_t, b_count)),
+            ) => {
                 if a_count != b_count {
                     false
                 } else {
@@ -895,7 +766,10 @@ impl TypeResolver {
                     self.are_equiv(*a_bucket, *b_bucket, memo)
                 }
             }
-            (TypeInfo::Comp(TypeComp::Subroutine(a_ret, a_param)), TypeInfo::Comp(TypeComp::Subroutine(b_ret, b_param))) => {
+            (
+                TypeInfo::Comp(TypeComp::Subroutine(a_ret, a_param)),
+                TypeInfo::Comp(TypeComp::Subroutine(b_ret, b_param)),
+            ) => {
                 let a_bucket = self.offset_to_bucket.get(a_ret).unwrap();
                 let b_bucket = self.offset_to_bucket.get(b_ret).unwrap();
                 if a_param.len() != b_param.len() {
@@ -915,11 +789,14 @@ impl TypeResolver {
                     r
                 }
             }
-            (TypeInfo::Comp(TypeComp::Ptmf(a_this, a_ret, a_param)), TypeInfo::Comp(TypeComp::Ptmf(b_this, b_ret, b_param))) => {
+            (
+                TypeInfo::Comp(TypeComp::Ptmf(a_this, a_ret, a_param)),
+                TypeInfo::Comp(TypeComp::Ptmf(b_this, b_ret, b_param)),
+            ) => {
                 let a_bucket_this = self.offset_to_bucket.get(a_this).unwrap();
                 let b_bucket_this = self.offset_to_bucket.get(b_this).unwrap();
-                let a_bucket= self.offset_to_bucket.get(a_ret).unwrap();
-                let b_bucket= self.offset_to_bucket.get(b_ret).unwrap();
+                let a_bucket = self.offset_to_bucket.get(a_ret).unwrap();
+                let b_bucket = self.offset_to_bucket.get(b_ret).unwrap();
                 // ptmf are similar to subroutine, with an additional this type
                 if a_param.len() != b_param.len() {
                     false
@@ -940,18 +817,10 @@ impl TypeResolver {
                     r
                 }
             }
-            _ => {
-                false
-            }
+            _ => false,
         };
 
-        // memo.insert((a_offset, b_offset), result);
         result
-    }
-    pub fn merge_all(&mut self, offsets: &[(usize, usize)], progress: &mut ProgressPrinter) {
-        for (a, b) in offsets {
-            self.merge(*a, *b);
-        }
     }
     pub fn merge_set(&mut self, offsets: &[usize]) {
         if offsets.len() < 2 {
@@ -992,7 +861,9 @@ impl TypeResolver {
         for b_offset in &b_offsets {
             self.offset_to_bucket.insert(*b_offset, a_bucket);
         }
-        self.bucket_to_offsets.get_mut(&a_bucket).unwrap().extend(b_offsets);
+        self.bucket_to_offsets
+            .get_mut(&a_bucket)
+            .unwrap()
+            .extend(b_offsets);
     }
 }
-

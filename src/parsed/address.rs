@@ -1,8 +1,6 @@
 use error_stack::{report, Result, ResultExt};
 
-use super::TypeStore;
-
-
+use super::{Error, TypeStore};
 
 #[derive(Clone, Debug)]
 pub struct AddressInfo {
@@ -95,14 +93,20 @@ pub enum AddressInfoMismatch {
     ParamNameMismatch(usize),
     #[error("Data type mismatch")]
     DataTypeMismatch,
+    #[error("Type error")]
+    Type,
 }
 
 impl AddressInfo {
-    pub fn check_and_merge(&mut self, other: AddressInfo, types: &TypeStore) -> Result<(), AddressInfoMismatch> {
+    pub fn check_and_merge(
+        &mut self,
+        other: AddressInfo,
+        types: &TypeStore,
+    ) -> Result<(), AddressInfoMismatch> {
         // other wouldn't have address so we don't check
         if self.name != other.name {
             return Err(report!(AddressInfoMismatch::NameMismatch))
-            .attach_printable(format!("self: {} != other: {}", self.name, other.name));
+                .attach_printable(format!("self: {} != other: {}", self.name, other.name));
         }
 
         match (&mut self.info, &other.info) {
@@ -110,38 +114,65 @@ impl AddressInfo {
             (AddrType::Data(a), AddrType::Data(b)) => a.check_and_merge(b, types),
             _ => {
                 return Err(report!(AddressInfoMismatch::TypeMismatch))
-                .attach_printable(format!("self: {} != other: {}", self.info, other.info));
-            },
+                    .attach_printable(format!("self: {} != other: {}", self.info, other.info));
+            }
         }
     }
 
-    pub fn mark_types(&self, types: &mut TypeStore) {
+    pub fn mark_types(&self, types: &mut TypeStore) -> Result<(), Error> {
         match &self.info {
-            AddrType::Func(info) => info.mark_types(types),
-            AddrType::Data(info) => info.mark_types(types),
+            AddrType::Func(info) => info.mark_types(types)?,
+            AddrType::Data(info) => info.mark_types(types)?,
             _ => {}
         }
+        Ok(())
     }
 }
 
 impl FuncInfo {
     /// Update self with other if any info is missing. Return false if there are inconsistencies
-    pub fn check_and_merge(&mut self, other: &FuncInfo, types: &TypeStore) -> Result<(), AddressInfoMismatch> {
+    pub fn check_and_merge(
+        &mut self,
+        other: &FuncInfo,
+        types: &TypeStore,
+    ) -> Result<(), AddressInfoMismatch> {
         if self.args.len() != other.args.len() {
-            return Err(report!(AddressInfoMismatch::ParamCountMismatch))
-            .attach_printable(format!("self: {} != other: {}", self.args.len(), other.args.len()));
+            return Err(report!(AddressInfoMismatch::ParamCountMismatch)).attach_printable(
+                format!("self: {} != other: {}", self.args.len(), other.args.len()),
+            );
         }
-        if !types.are_equal(self.ret_ty_offset, other.ret_ty_offset) {
+        if !types
+            .are_equal(self.ret_ty_offset, other.ret_ty_offset)
+            .change_context(AddressInfoMismatch::Type)?
+        {
+            let a_bucket = types
+                .get_bucket(self.ret_ty_offset)
+                .map(|s| format!("0x{s:08x}"))
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let b_bucket = types
+                .get_bucket(other.ret_ty_offset)
+                .map(|s| format!("0x{s:08x}"))
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let a = types
+                .get_name(self.ret_ty_offset)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let b = types
+                .get_name(other.ret_ty_offset)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
             return Err(report!(AddressInfoMismatch::RetTypeMismatch))
-            .attach_printable(format!("self: {} != other: {}", types.get_name(self.ret_ty_offset), types.get_name(other.ret_ty_offset)))
-            .attach_printable(format!("self_bucket: 0x{:08x} != other_bucket: 0x{:08x}", types.get_bucket(self.ret_ty_offset), types.get_bucket(other.ret_ty_offset)));
+                .attach_printable(format!("self: {a} != other: {b}"))
+                .attach_printable(format!(
+                    "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
+                ));
         }
         for (i, (a, b)) in self.args.iter_mut().zip(&other.args).enumerate() {
             match (&mut a.0, &b.0) {
                 (Some(a), Some(b)) => {
                     if a != b {
                         return Err(report!(AddressInfoMismatch::ParamNameMismatch(i)))
-                        .attach_printable(format!("self: {} != other: {}", a, b));
+                            .attach_printable(format!("self: {} != other: {}", a, b));
                     }
                 }
                 (None, Some(b)) => {
@@ -151,10 +182,31 @@ impl FuncInfo {
             }
             match (&mut a.1, &b.1) {
                 (Some(a), Some(b)) => {
-                    if !types.are_equal(*a, *b) {
+                    if !types
+                        .are_equal(*a, *b)
+                        .change_context(AddressInfoMismatch::Type)?
+                    {
+                        let a_bucket = types
+                            .get_bucket(self.ret_ty_offset)
+                            .map(|s| format!("0x{s:08x}"))
+                            .unwrap_or_else(|_| "<unknown>".to_string());
+                        let b_bucket = types
+                            .get_bucket(other.ret_ty_offset)
+                            .map(|s| format!("0x{s:08x}"))
+                            .unwrap_or_else(|_| "<unknown>".to_string());
+                        let a = types
+                            .get_name(self.ret_ty_offset)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| "<unknown>".to_string());
+                        let b = types
+                            .get_name(other.ret_ty_offset)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| "<unknown>".to_string());
                         return Err(report!(AddressInfoMismatch::ParamTypeMismatch(i)))
-                        .attach_printable(format!("self: {} != other: {}", types.get_name(*a), types.get_name(*b)))
-            .attach_printable(format!("self_bucket: 0x{:08x} != other_bucket: 0x{:08x}", types.get_bucket(*a), types.get_bucket(*b)));
+                            .attach_printable(format!("self: {a} != other: {b}"))
+                            .attach_printable(format!(
+                                "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
+                            ));
                     }
                 }
                 (None, Some(b)) => {
@@ -165,24 +217,51 @@ impl FuncInfo {
         }
         Ok(())
     }
-    pub fn mark_types(&self, types: &mut TypeStore) {
-        types.mark_referenced(self.ret_ty_offset);
+
+    pub fn mark_types(&self, types: &mut TypeStore) -> Result<(), Error> {
+        types.mark_referenced(self.ret_ty_offset)?;
         for (_, ty) in &self.args {
             if let Some(ty) = ty {
-                types.mark_referenced(*ty);
+                types.mark_referenced(*ty)?;
             }
         }
+        Ok(())
     }
 }
 
 impl DataInfo {
-    pub fn check_and_merge(&mut self, other: &DataInfo, types: &TypeStore) -> Result<(), AddressInfoMismatch> {
+    pub fn check_and_merge(
+        &mut self,
+        other: &DataInfo,
+        types: &TypeStore,
+    ) -> Result<(), AddressInfoMismatch> {
         match (&mut self.ty_offset, other.ty_offset) {
             (Some(a), Some(b)) => {
-                if !types.are_equal(*a, b) {
+                if !types
+                    .are_equal(*a, b)
+                    .change_context(AddressInfoMismatch::Type)?
+                {
+                    let a_bucket = types
+                        .get_bucket(*a)
+                        .map(|s| format!("0x{s:08x}"))
+                        .unwrap_or_else(|_| "<unknown>".to_string());
+                    let b_bucket = types
+                        .get_bucket(b)
+                        .map(|s| format!("0x{s:08x}"))
+                        .unwrap_or_else(|_| "<unknown>".to_string());
+                    let a = types
+                        .get_name(*a)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string());
+                    let b = types
+                        .get_name(b)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string());
                     return Err(report!(AddressInfoMismatch::DataTypeMismatch))
-                    .attach_printable(format!("self: {} != other: {}", types.get_name(*a), types.get_name(b)))
-            .attach_printable(format!("self_bucket: 0x{:08x} != other_bucket: 0x{:08x}", types.get_bucket(*a), types.get_bucket(b)));
+                        .attach_printable(format!("self: {a} != other: {b}"))
+                        .attach_printable(format!(
+                            "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
+                        ));
                 }
             }
             (None, Some(b)) => {
@@ -193,9 +272,10 @@ impl DataInfo {
         Ok(())
     }
 
-    pub fn mark_types(&self, types: &mut TypeStore) {
+    pub fn mark_types(&self, types: &mut TypeStore) -> Result<(), Error> {
         if let Some(ty) = self.ty_offset {
-            types.mark_referenced(ty);
+            types.mark_referenced(ty)?;
         }
+        Ok(())
     }
 }

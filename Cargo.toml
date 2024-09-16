@@ -1,10 +1,9 @@
 [package]
-name = "uking-extract"
+name = "uking2ida"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.87"
 elf = "0.7.4"
 error-stack = "0.5.0"
 gimli = "0.31.0"
@@ -12,4 +11,8 @@ itertools = "0.13.0"
 num_cpus = "1.16.0"
 terminal_size = "0.3.0"
 thiserror = "1.0.63"
-threadpool = "1.8.1"
+
+[features]
+default = []
+debug-resolve-name = [] # Debug name resolution algorithm
+debug-type-gc = [] # Debug type garbage collection algorithm

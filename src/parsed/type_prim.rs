@@ -34,11 +34,8 @@ pub enum TypePrim {
     F128,
 }
 
-pub trait TypeYaml {
-    fn yaml_string(&self) -> String;
-}
-
 impl TypePrim {
+    /// Get the size of type in bytes. Return None if the type is void.
     pub fn size(&self) -> Option<usize> {
         Some(match self {
             Self::Void => return None,
@@ -51,6 +48,8 @@ impl TypePrim {
         })
     }
 
+    /// Get the name of the type in IDA
+    #[allow(dead_code)]
     pub fn ida_type(&self) -> &'static str {
         match self {
             Self::Void => "void",
@@ -70,7 +69,6 @@ impl TypePrim {
             Self::F128 => "long double",
         }
     }
-    
 }
 
 impl std::fmt::Display for TypePrim {
@@ -95,12 +93,6 @@ impl std::fmt::Display for TypePrim {
     }
 }
 
-impl TypeYaml for TypePrim {
-    fn yaml_string(&self) -> String {
-        self.to_string()
-    }
-}
-
 /// Composite or compound types
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeComp<T> {
@@ -112,22 +104,6 @@ pub enum TypeComp<T> {
     Subroutine(T, Vec<T>),
     /// Ptr-to-member-function (this_ty, ret_ty, param_ty)
     Ptmf(T, T, Vec<T>),
-}
-
-impl<T> TypeComp<T> {
-    pub fn convert<T2>(self, f: impl Fn(T) -> T2) -> TypeComp<T2> {
-        match self {
-            TypeComp::Ptr(t) => TypeComp::Ptr(f(t)),
-            TypeComp::Array(t, n) => TypeComp::Array(f(t), n),
-            TypeComp::Subroutine(ret_ty, param_ty) => {
-                TypeComp::Subroutine(f(ret_ty), param_ty.into_iter().map(f).collect())
-            }
-            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                TypeComp::Ptmf(f(this_ty), f(ret_ty), param_ty.into_iter().map(f).collect())
-            }
-        }
-    }
-    
 }
 
 impl std::fmt::Display for TypeComp<usize> {
@@ -155,6 +131,34 @@ impl std::fmt::Display for TypeComp<usize> {
     }
 }
 
+/// Trait to convert the type into a YAML string that can be parsed
+/// by the IDAPython script for importing into IDA
+///
+/// The YAML string has the following format:
+/// - It should be a comma separated list of values, so it's a valid list in YAML when put between
+/// `[` and `]`
+/// - Primitive types are string of the primitive representation:
+///   - `void`
+///   - `bool`
+///   - `i`, `u`, `f` followed by the bit width
+/// - Name types (struct, enum, union` are string of the name surrounded by `""`, such as
+/// `"ksys::Foo"`
+/// - Pointer types have 2 elements: the base type followed by `'*'`
+/// - Array types also have 2 elements: the base type followed by `[n]` (a list with a single
+/// element that's the element count
+/// - Subroutine types have 3 elements: the return type, followed by the string `()`, and a list of parameters
+///   - Each parameter is a type, represented as a list with type YAML inside it
+/// - PTMF types have 4 elements: the return type, the `'(ptmf)'` string, the type for `this`, and a list of parameters
+pub trait TypeYaml {
+    fn yaml_string(&self) -> String;
+}
+
+impl TypeYaml for TypePrim {
+    fn yaml_string(&self) -> String {
+        self.to_string()
+    }
+}
+
 impl<T: TypeYaml> TypeYaml for TypeComp<T> {
     fn yaml_string(&self) -> String {
         let (mut s, param_ty) = match self {
@@ -165,7 +169,11 @@ impl<T: TypeYaml> TypeYaml for TypeComp<T> {
                 (s, param_ty)
             }
             TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                let s = format!("{},'(ptmf)', [{}], [", ret_ty.yaml_string(), this_ty.yaml_string());
+                let s = format!(
+                    "{},'(ptmf)', [{}], [",
+                    ret_ty.yaml_string(),
+                    this_ty.yaml_string()
+                );
                 (s, param_ty)
             }
         };

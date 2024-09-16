@@ -1,11 +1,17 @@
 use std::{
-    collections::{BTreeMap, BTreeSet}, fs::File, io::{BufRead, BufReader, IsTerminal, Write}, path::Path, sync::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::{BufRead, BufReader, IsTerminal, Write},
+    path::Path,
+    sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
-    }, thread::JoinHandle, time::Instant
+    },
+    thread::JoinHandle,
+    time::Instant,
 };
 
-use error_stack::{Report, Result, ResultExt};
+use error_stack::{Result, ResultExt};
 
 #[inline]
 pub fn read_as_bytes(file: impl AsRef<Path>) -> Result<Vec<u8>, std::io::Error> {
@@ -30,10 +36,15 @@ pub enum UkingParseError {
     MissingDataAddr,
 }
 
-pub fn read_uking_functions(file: impl AsRef<Path>, out: &mut BTreeMap<String, u64>) -> Result<(), UkingParseError> {
+pub fn read_uking_functions(
+    file: impl AsRef<Path>,
+    out: &mut BTreeMap<String, u64>,
+) -> Result<(), UkingParseError> {
     let path = file.as_ref().display().to_string();
-    let file = File::open(file).change_context(UkingParseError::OpenFile)
-    .attach_printable_lazy(|| format!("Path: {}", path))?;
+    println!("Reading uking functions from {}", path);
+    let file = File::open(file)
+        .change_context(UkingParseError::OpenFile)
+        .attach_printable_lazy(|| format!("Path: {}", path))?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let line = line.change_context(UkingParseError::ReadFile)?;
@@ -69,10 +80,15 @@ fn parse_uking_function(line: &str) -> Result<Option<(u64, &str)>, UkingParseErr
     }
 }
 
-pub fn read_uking_data(file: impl AsRef<Path>, out: &mut BTreeMap<String, u64>) -> Result<BTreeSet<String>, UkingParseError> {
+pub fn read_uking_data(
+    file: impl AsRef<Path>,
+    out: &mut BTreeMap<String, u64>,
+) -> Result<BTreeSet<String>, UkingParseError> {
     let path = file.as_ref().display().to_string();
-    let file = File::open(file).change_context(UkingParseError::OpenFile)
-    .attach_printable_lazy(|| format!("Path: {}", path))?;
+    println!("Reading uking data symbols from {}", path);
+    let file = File::open(file)
+        .change_context(UkingParseError::OpenFile)
+        .attach_printable_lazy(|| format!("Path: {}", path))?;
     let reader = BufReader::new(file);
     let mut names = BTreeSet::new();
     for line in reader.lines() {
@@ -173,7 +189,6 @@ impl ProgressPrinter {
                 s.push_str(&eta);
             }
             s
-
         };
         let prefix_len = prefix.len();
         if prefix_len > self.term_width {

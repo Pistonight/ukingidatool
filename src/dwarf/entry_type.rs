@@ -5,7 +5,6 @@ use error_stack::Result;
 use super::unit::{err_ctx, opt_ctx};
 use super::{Error, UnitCtx, UnitOffset, DIE};
 
-
 impl<'d, 'i> UnitCtx<'d, 'i> {
     /// Get the DW_AT_type of a DIE
     pub fn get_entry_type_offset(&self, entry: &DIE<'i, '_, '_>) -> Result<UnitOffset, Error> {
@@ -65,7 +64,10 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
     }
 
     /// Get the DW_AT_containing_type of a DIE
-    pub fn get_entry_containing_type_offset(&self, entry: &DIE<'i, '_, '_>) -> Result<UnitOffset, Error> {
+    pub fn get_entry_containing_type_offset(
+        &self,
+        entry: &DIE<'i, '_, '_>,
+    ) -> Result<UnitOffset, Error> {
         let offset = self.to_global_offset(entry.offset());
         let type_value = err_ctx!(
             self,

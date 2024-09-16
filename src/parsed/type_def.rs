@@ -1,20 +1,18 @@
-use std::sync::Arc;
+use super::{TypePrim, TypeYaml};
 
-use super::{TypeComp, TypePrim, TypeYaml};
-
+/// Exportable type definition
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDef {
-    // Prim(TypePrim),
     /// Struct or Class
     Struct(StructDef),
     /// Enum
     Enum(EnumDef),
     /// Union
     Union(UnionDef),
-    // Comp(Box<TypeComp<TypeDef>>),
 }
 
 impl TypeDef {
+    /// Create a PTMF type for the underlying type
     pub fn ptmf(name: String) -> Self {
         let func = MemberDef {
             offset: 0,
@@ -33,7 +31,7 @@ impl TypeDef {
             name,
             size: 16,
             vtable: vec![],
-            members
+            members,
         };
         Self::Struct(ptmf)
     }
@@ -63,21 +61,23 @@ impl TypeDef {
 impl TypeYaml for TypeDef {
     fn yaml_string(&self) -> String {
         match self {
-            // TypeDef::Prim(p) => p.yaml_string(),
             TypeDef::Struct(x) => format!("\"{}\"", x.name),
             TypeDef::Enum(x) => format!("\"{}\"", x.name),
             TypeDef::Union(x) => format!("\"{}\"", x.name),
-            // TypeDef::Comp(c) => c.yaml_string(),
         }
     }
 }
 
-
+/// Definition of a struct
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
+    /// The name of the struct
     pub name: String,
+    /// The vtable of the struct
     pub vtable: Vec<String>,
+    /// The size of the struct in bytes
     pub size: usize,
+    /// The members of the struct
     pub members: Vec<MemberDef>,
 }
 impl TypeYaml for StructDef {
@@ -99,13 +99,19 @@ impl TypeYaml for StructDef {
     }
 }
 
+/// Definition of a member of a struct
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberDef {
+    /// Offset of the member in the struct
     pub offset: usize,
+    /// Name of the member
     pub name: String,
+    /// If the member is a base type
     pub is_base: bool,
+    /// The type name of the member in YAML
     pub ty_yaml: String,
 }
+
 impl TypeYaml for MemberDef {
     fn yaml_string(&self) -> String {
         let mut s = format!("      '0x{:x}': {{ ", self.offset);
@@ -118,10 +124,14 @@ impl TypeYaml for MemberDef {
     }
 }
 
+/// Definition of an enum
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef {
+    /// The name of the enum
     pub name: String,
+    /// The size of the enum in bytes
     pub size: usize,
+    /// The enumerators of the enum (name, value)
     pub enumerators: Vec<(String, i128)>,
 }
 impl TypeYaml for EnumDef {
@@ -130,16 +140,24 @@ impl TypeYaml for EnumDef {
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
         s.push_str("    enumerators:\n");
         for (name, val) in &self.enumerators {
-            s.push_str(&format!("      {name}: {val}\n"))
+            if *val >= 0 {
+                s.push_str(&format!("      {name}: 0x{val:x}\n"))
+            } else {
+                s.push_str(&format!("      {name}: {val}\n"))
+            }
         }
         s
     }
 }
 
+/// Definition of a union
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnionDef {
+    /// The name of the union
     pub name: String,
+    /// The size of the union in bytes
     pub size: usize,
+    /// The members of the union (name, type)
     pub members: Vec<(String, String)>,
 }
 impl TypeYaml for UnionDef {

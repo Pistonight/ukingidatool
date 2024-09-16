@@ -5,7 +5,6 @@ use error_stack::Result;
 use super::unit::{err_ctx, opt_ctx};
 use super::{Error, UnitCtx, DIE};
 
-
 impl<'d, 'i> UnitCtx<'d, 'i> {
     /// Get the DW_AT_name of a DIE
     pub fn get_entry_name(&self, entry: &DIE<'i, '_, '_>) -> Result<&'i str, Error> {
@@ -21,7 +20,10 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
     }
 
     /// Get the DW_AT_name of a DIE, allowing it to be missing
-    pub fn get_entry_name_optional(&self, entry: &DIE<'i, '_, '_>) -> Result<Option<&'i str>, Error> {
+    pub fn get_entry_name_optional(
+        &self,
+        entry: &DIE<'i, '_, '_>,
+    ) -> Result<Option<&'i str>, Error> {
         let offset = self.to_global_offset(entry.offset());
         let name = err_ctx!(
             self,

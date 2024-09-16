@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
-use error_stack::{report, ResultExt, Result};
-use gimli::{Abbreviations, AttributeValue, DW_AT_declaration, DW_AT_external, DwTag, UnitSectionOffset};
+use error_stack::{report, Result, ResultExt};
+use gimli::{
+    Abbreviations, AttributeValue, DW_AT_declaration, DW_AT_external, DwTag, UnitSectionOffset,
+};
 
 use crate::parsed::Namespace;
 
@@ -137,8 +139,17 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
     }
 
     /// Get the root of entry tree
-    pub fn root_of<'t, 'a, 'u>(&self, offset: UnitOffset, tree: &'t mut Tree<'i, 'a, 'u>) -> Result<Node<'i, 'a, 'u, 't>, Error> {
-        err_ctx!(self, self.to_global_offset(offset), Error::ReadRoot, tree.root())
+    pub fn root_of<'t, 'a, 'u>(
+        &self,
+        offset: UnitOffset,
+        tree: &'t mut Tree<'i, 'a, 'u>,
+    ) -> Result<Node<'i, 'a, 'u, 't>, Error> {
+        err_ctx!(
+            self,
+            self.to_global_offset(offset),
+            Error::ReadRoot,
+            tree.root()
+        )
     }
 
     /// Get an attribute value as string
@@ -158,7 +169,7 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
         let entry_tag = entry.tag();
         if entry_tag != tag {
             return bad!(self, offset, Error::UnexpectedTag(entry_tag))
-            .attach_printable(format!("Expecting: {}", tag));
+                .attach_printable(format!("Expecting: {}", tag));
         }
         Ok(())
     }
@@ -175,8 +186,12 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
         match value {
             None => Ok(false),
             Some(AttributeValue::Flag(x)) => Ok(x),
-            _ => bad!(self, offset, Error::BadEntryAttrType(DW_AT_external, "Flag"))
-                .attach_printable(format!("Got: {:?}", value)),
+            _ => bad!(
+                self,
+                offset,
+                Error::BadEntryAttrType(DW_AT_external, "Flag")
+            )
+            .attach_printable(format!("Got: {:?}", value)),
         }
     }
 
@@ -192,8 +207,12 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
         match value {
             None => Ok(false),
             Some(AttributeValue::Flag(x)) => Ok(x),
-            _ => bad!(self, offset, Error::BadEntryAttrType(DW_AT_declaration, "Flag"))
-                .attach_printable(format!("Got: {:?}", value)),
+            _ => bad!(
+                self,
+                offset,
+                Error::BadEntryAttrType(DW_AT_declaration, "Flag")
+            )
+            .attach_printable(format!("Got: {:?}", value)),
         }
     }
 

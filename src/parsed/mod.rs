@@ -14,3 +14,19 @@ mod type_resolve;
 pub use type_resolve::*;
 mod type_store;
 pub use type_store::*;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("The base type for a PTMF must be a named type")]
+    UnexpectedUnnamedPtmfThis,
+    #[error("Failed to resolve names")]
+    ResolveName,
+    #[error("Unresolved name")]
+    UnresolvedName,
+    #[error("Namespace not found: 0x{0:08x}")]
+    UnlinkedNamespace(usize),
+    #[error("Type not found: 0x{0:08x}")]
+    UnlinkedType(usize),
+    #[error("Type `{0}` is referenced but not actually generated")]
+    BrokenTypeRef(String),
+}

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap, fs::File, io::{BufRead, BufReader, IsTerminal, Write}, path::Path, sync::{
+    collections::{BTreeMap, BTreeSet}, fs::File, io::{BufRead, BufReader, IsTerminal, Write}, path::Path, sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     }, thread::JoinHandle, time::Instant
@@ -69,18 +69,20 @@ fn parse_uking_function(line: &str) -> Result<Option<(u64, &str)>, UkingParseErr
     }
 }
 
-pub fn read_uking_data(file: impl AsRef<Path>, out: &mut BTreeMap<String, u64>) -> Result<(), UkingParseError> {
+pub fn read_uking_data(file: impl AsRef<Path>, out: &mut BTreeMap<String, u64>) -> Result<BTreeSet<String>, UkingParseError> {
     let path = file.as_ref().display().to_string();
     let file = File::open(file).change_context(UkingParseError::OpenFile)
     .attach_printable_lazy(|| format!("Path: {}", path))?;
     let reader = BufReader::new(file);
+    let mut names = BTreeSet::new();
     for line in reader.lines() {
         let line = line.change_context(UkingParseError::ReadFile)?;
         if let Some((addr, name)) = parse_uking_data(&line)? {
             out.insert(name.to_string(), addr);
+            names.insert(name.to_string());
         }
     }
-    Ok(())
+    Ok(names)
 }
 
 fn parse_uking_data(line: &str) -> Result<Option<(u64, &str)>, UkingParseError> {
@@ -163,7 +165,7 @@ impl ProgressPrinter {
         } else {
             let mut s = format!("[{1}/{2}] {0}: ", self.prefix, current, self.total);
             let elapsed = self.start_time.elapsed().as_secs_f32();
-            if elapsed > 5.0 {
+            if elapsed > 2.0 {
                 let percentage = format!("{:.02}% ", (current as f32 / self.total as f32) * 100.0);
                 let speed = current as f32 / elapsed;
                 let eta = format!("ETA {:.02}s ", (self.total - current) as f32 / speed);
@@ -193,6 +195,10 @@ impl ProgressPrinter {
 
     pub fn set_total(&mut self, total: usize) {
         self.total = total;
+    }
+
+    pub fn reset_timer(&mut self) {
+        self.start_time = Instant::now();
     }
 
     pub fn set_prefix(&mut self, prefix: impl Into<String>) {

@@ -34,6 +34,10 @@ pub enum TypePrim {
     F128,
 }
 
+pub trait TypeYaml {
+    fn yaml_string(&self) -> String;
+}
+
 impl TypePrim {
     pub fn size(&self) -> Option<usize> {
         Some(match self {
@@ -45,6 +49,26 @@ impl TypePrim {
             Self::U64 | Self::I64 | Self::F64 => 8,
             Self::U128 | Self::I128 | Self::F128 => 16,
         })
+    }
+
+    pub fn ida_type(&self) -> &'static str {
+        match self {
+            Self::Void => "void",
+            Self::Bool => "bool",
+            Self::U8 => "unsigned char",
+            Self::U16 => "unsigned short",
+            Self::U32 => "unsigned int",
+            Self::U64 => "unsigned long",
+            Self::U128 => "unsigned __int128",
+            Self::I8 => "char",
+            Self::I16 => "short",
+            Self::I32 => "int",
+            Self::I64 => "long",
+            Self::I128 => "__int128",
+            Self::F32 => "float",
+            Self::F64 => "double",
+            Self::F128 => "long double",
+        }
     }
     
 }
@@ -71,6 +95,12 @@ impl std::fmt::Display for TypePrim {
     }
 }
 
+impl TypeYaml for TypePrim {
+    fn yaml_string(&self) -> String {
+        self.to_string()
+    }
+}
+
 /// Composite or compound types
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeComp<T> {
@@ -82,6 +112,22 @@ pub enum TypeComp<T> {
     Subroutine(T, Vec<T>),
     /// Ptr-to-member-function (this_ty, ret_ty, param_ty)
     Ptmf(T, T, Vec<T>),
+}
+
+impl<T> TypeComp<T> {
+    pub fn convert<T2>(self, f: impl Fn(T) -> T2) -> TypeComp<T2> {
+        match self {
+            TypeComp::Ptr(t) => TypeComp::Ptr(f(t)),
+            TypeComp::Array(t, n) => TypeComp::Array(f(t), n),
+            TypeComp::Subroutine(ret_ty, param_ty) => {
+                TypeComp::Subroutine(f(ret_ty), param_ty.into_iter().map(f).collect())
+            }
+            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                TypeComp::Ptmf(f(this_ty), f(ret_ty), param_ty.into_iter().map(f).collect())
+            }
+        }
+    }
+    
 }
 
 impl std::fmt::Display for TypeComp<usize> {
@@ -106,5 +152,32 @@ impl std::fmt::Display for TypeComp<usize> {
             write!(f, ", <0x{t:08x}>")?;
         }
         write!(f, ")")
+    }
+}
+
+impl<T: TypeYaml> TypeYaml for TypeComp<T> {
+    fn yaml_string(&self) -> String {
+        let (mut s, param_ty) = match self {
+            TypeComp::Ptr(t) => return format!("{},'*'", t.yaml_string()),
+            TypeComp::Array(t, n) => return format!("{},[{}]", t.yaml_string(), n),
+            TypeComp::Subroutine(ret_ty, param_ty) => {
+                let s = format!("{},'()', [", ret_ty.yaml_string());
+                (s, param_ty)
+            }
+            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                let s = format!("{},'(ptmf)', [{}], [", ret_ty.yaml_string(), this_ty.yaml_string());
+                (s, param_ty)
+            }
+        };
+
+        let mut iter = param_ty.iter();
+        if let Some(t) = iter.next() {
+            s.push_str(&format!("[{}]", t.yaml_string()));
+        }
+        for t in iter {
+            s.push_str(&format!(", [{}]", t.yaml_string()));
+        }
+        s.push_str("]");
+        s
     }
 }

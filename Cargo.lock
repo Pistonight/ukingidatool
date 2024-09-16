@@ -233,6 +233,7 @@ dependencies = [
  "error-stack",
  "gimli",
  "itertools",
+ "num_cpus",
  "terminal_size",
  "thiserror",
  "threadpool",

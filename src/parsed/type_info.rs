@@ -32,6 +32,7 @@ impl std::fmt::Display for TypeInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructInfo {
     pub name: Option<String>,
+    pub is_decl: bool,
     pub vtable: Vec<String>, // function names
     pub size: usize,
     pub members: Vec<MemberInfo>,
@@ -41,12 +42,12 @@ impl StructInfo {
     pub fn zst() -> Self {
         Self {
             name: Some("ZeroSizedType".to_string()),
+            is_decl: false,
             vtable: Vec::new(),
             size: 0,
             members: Vec::new(),
         }
     }
-    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub struct MemberInfo {
 pub struct EnumInfo {
     pub name: Option<String>,
     pub size: usize,
+    pub is_decl: bool,
     pub enumerators: Vec<(String, i128)>,
 }
 
@@ -68,6 +70,7 @@ pub struct EnumInfo {
 pub struct UnionInfo {
     pub name: Option<String>,
     pub size: usize,
+    pub is_decl: bool,
     pub members: Vec<(Option<String>, usize)>,
 }
 

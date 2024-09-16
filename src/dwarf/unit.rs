@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use error_stack::{report, ResultExt, Result};
-use gimli::{Abbreviations, AttributeValue, DW_AT_external, DwTag, UnitSectionOffset};
+use gimli::{Abbreviations, AttributeValue, DW_AT_declaration, DW_AT_external, DwTag, UnitSectionOffset};
 
 use crate::parsed::Namespace;
 
@@ -176,6 +176,23 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
             None => Ok(false),
             Some(AttributeValue::Flag(x)) => Ok(x),
             _ => bad!(self, offset, Error::BadEntryAttrType(DW_AT_external, "Flag"))
+                .attach_printable(format!("Got: {:?}", value)),
+        }
+    }
+
+    /// Get the DW_AT_declaration of a DIE
+    pub fn get_entry_declaration(&self, entry: &DIE<'i, '_, '_>) -> Result<bool, Error> {
+        let offset = self.to_global_offset(entry.offset());
+        let value = err_ctx!(
+            self,
+            offset,
+            Error::ReadEntryAttr(DW_AT_declaration),
+            entry.attr_value(DW_AT_declaration)
+        )?;
+        match value {
+            None => Ok(false),
+            Some(AttributeValue::Flag(x)) => Ok(x),
+            _ => bad!(self, offset, Error::BadEntryAttrType(DW_AT_declaration, "Flag"))
                 .attach_printable(format!("Got: {:?}", value)),
         }
     }

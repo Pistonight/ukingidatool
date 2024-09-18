@@ -4,11 +4,12 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use error_stack::{Result, ResultExt};
+use parsed::{AddrType, AddressInfo, DataInfo, TypeYaml};
 
-// mod data;
 mod dwarf;
 mod parsed;
 mod util;
+mod uking;
 mod worker;
 
 #[derive(Debug, thiserror::Error)]
@@ -17,6 +18,10 @@ pub enum Error {
     Uking,
     #[error("Failed to process DWARF")]
     Dwarf,
+    #[error("Failed to create type definitions")]
+    CreateType,
+    #[error("Failed to write output file")]
+    WriteFile,
 }
 
 fn main() -> ExitCode {
@@ -32,14 +37,73 @@ fn main() -> ExitCode {
 
 fn main_inner() -> Result<(), Error> {
     let mut uking_symbols = BTreeMap::new();
-    util::read_uking_functions("botw-decomp/data/uking_functions.csv", &mut uking_symbols)
+    let decompiled_functions = uking::read_uking_functions("botw-decomp/data/uking_functions.csv", &mut uking_symbols)
         .change_context(Error::Uking)?;
     let data_symbols =
-        util::read_uking_data("botw-decomp/data/data_symbols.csv", &mut uking_symbols)
+        uking::read_uking_data("botw-decomp/data/data_symbols.csv", &mut uking_symbols)
             .change_context(Error::Uking)?;
-    println!("Parsed {} uking symbols", uking_symbols.len());
+    println!("Parsed {} symbols, found {} decompiled functions", uking_symbols.len(), decompiled_functions.len());
+
     let elf_path = Path::new("uking.elf");
-    dwarf::extract(elf_path, "output.yaml", &mut uking_symbols, &data_symbols)
-        .change_context(Error::Dwarf)?;
+    let mut dwarf = dwarf::extract(elf_path, &mut uking_symbols, &decompiled_functions).change_context(Error::Dwarf)?;
+
+    println!("Adding {} undecompiled symbols", uking_symbols.len());
+    for (symbol, address) in uking_symbols {
+        if dwarf.address.contains_key(&symbol) {
+            // already processed, not possible
+            panic!(
+                "Symbol `{}` is already processed. This shouldn't be possible",
+                symbol
+            );
+        }
+        if data_symbols.contains(&symbol) {
+            // data symbol
+            dwarf.address.insert(
+                symbol.clone(),
+                AddressInfo {
+                    uking_address: address,
+                    name: symbol,
+                    info: AddrType::Data(DataInfo { ty_offset: None }),
+                },
+            );
+        } else {
+            // function symbol
+            dwarf.address.insert(
+                symbol.clone(),
+                AddressInfo {
+                    uking_address: address,
+                    name: symbol,
+                    info: AddrType::Undecompiled,
+                },
+            );
+        }
+    }
+
+    let output_path = "output.yaml";
+    // Type Output
+    let type_defs = dwarf.types
+        .create_defs()
+        .change_context(Error::CreateType)?;
+
+    println!("Created {} types (not including _vtbl)", type_defs.len());
+
+    let mut type_yaml = String::new();
+    type_yaml.push_str("enums:\n");
+    for enum_def in type_defs.values().filter_map(|x| x.as_enum()) {
+        type_yaml.push_str(&enum_def.yaml_string());
+    }
+    type_yaml.push_str("unions:\n");
+    for union_def in type_defs.values().filter_map(|x| x.as_union()) {
+        type_yaml.push_str(&union_def.yaml_string());
+    }
+    type_yaml.push_str("structs:\n");
+    for struct_def in type_defs.values().filter_map(|x| x.as_struct()) {
+        type_yaml.push_str(&struct_def.yaml_string());
+    }
+
+    // Write Output
+    std::fs::write(output_path, type_yaml).change_context(Error::WriteFile)?;
+    println!("Output written to {}", output_path);
+
     Ok(())
 }

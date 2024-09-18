@@ -1,10 +1,10 @@
 #![allow(non_upper_case_globals)]
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use elf::ElfBytes;
-use error_stack::{Report, Result, ResultExt};
+use error_stack::{report, Report, Result, ResultExt};
 use gimli::{
     AttributeValue, DW_TAG_GNU_template_parameter_pack, DW_TAG_enumerator, DW_TAG_restrict_type,
     DW_TAG_template_type_parameter, DW_TAG_variable, DW_TAG_volatile_type, DwAt, DwTag,
@@ -22,9 +22,9 @@ use gimli::{
 
 use crate::parsed::{
     AddrType, AddressInfo, DataInfo, EnumInfo, FuncInfo, MemberInfo, Namespace, StructInfo,
-    TypeComp, TypeInfo, TypePrim, TypeStore, TypeYaml, UnionInfo, VfptrInfo, VtableInfo,
+    TypeComp, TypeInfo, TypePrim, TypeStore, UnionInfo, VfptrInfo, VtableInfo,
 };
-use crate::util::{self, ProgressPrinter};
+use crate::util::ProgressPrinter;
 
 mod entry_integer;
 mod entry_name;
@@ -127,11 +127,10 @@ pub enum Error {
     ResolveType,
     #[error("Failed to garbage collect types")]
     GarbageCollectType,
-    #[error("Failed to create type definitions")]
-    CreateTypeDefinition,
-
-    #[error("Failed to write types.yaml")]
-    WriteFile,
+    #[error("Symbol looks like a decompiled symbol, but was not extracted from DWARF")]
+    UnmatchedSymbol,
+    #[error("Function has multiple alt names???")]
+    MultipleAltNames,
 }
 
 macro_rules! process_units {
@@ -148,14 +147,21 @@ macro_rules! process_units {
 }
 pub(crate) use process_units;
 
+/// Type and function info extracted from Dwarf
+pub struct DwarfInfo {
+    /// Map of symbol -> AddressInfo, including both data and function symbols
+    pub address: BTreeMap<String, AddressInfo>,
+    /// Resolved, deduplicated, and garbage collected types
+    pub types: TypeStore,
+}
+
 pub fn extract(
     elf_path: &Path,
-    output_path: impl AsRef<Path>,
     uking_symbols: &mut BTreeMap<String, u64>,
-    uking_data_symbols: &BTreeSet<String>,
-) -> Result<(), Error> {
+    decompiled_functions: &BTreeSet<String>,
+) -> Result<DwarfInfo, Error> {
     println!("Extracting DAWRF from ELF {}", elf_path.display());
-    let uking_elf = util::read_as_bytes(elf_path)
+    let uking_elf = std::fs::read(elf_path)
         .change_context_lazy(|| Error::ReadElf(elf_path.display().to_string()))?;
     let file = ElfBytes::<elf::endian::LittleEndian>::minimal_parse(&uking_elf)
         .change_context(Error::ParseElf)?;
@@ -209,7 +215,7 @@ pub fn extract(
     let data_types = {
         let mut data_types = BTreeMap::new();
         let mut addr_to_name = BTreeMap::new();
-        process_units!(units, "Processing symbols", unit, root, {
+        process_units!(units, "Processing address symbols", unit, root, {
             pass3(
                 root,
                 unit,
@@ -219,34 +225,12 @@ pub fn extract(
                 &types,
             )?;
         });
-        for (symbol, address) in std::mem::take(uking_symbols) {
-            if data_types.contains_key(&symbol) {
-                // already processed, not possible
-                panic!(
-                    "Symbol `{}` is already processed. This shouldn't be possible",
-                    symbol
-                );
-            }
-            if uking_data_symbols.contains(&symbol) {
-                // data symbol
-                data_types.insert(
-                    symbol.clone(),
-                    AddressInfo {
-                        uking_address: address,
-                        name: symbol,
-                        info: AddrType::Data(DataInfo { ty_offset: None }),
-                    },
-                );
-            } else {
-                // function symbol
-                data_types.insert(
-                    symbol.clone(),
-                    AddressInfo {
-                        uking_address: address,
-                        name: symbol,
-                        info: AddrType::Undecompiled,
-                    },
-                );
+        for (symbol, address) in uking_symbols {
+            if symbol.starts_with("_Z") && decompiled_functions.contains(symbol) {
+                let r = report!(Error::UnmatchedSymbol)
+                    .attach_printable(format!("Symbol: {}", symbol))
+                    .attach_printable(format!("Address: 0x{:016x}", address));
+                return Err(r);
             }
         }
         data_types
@@ -261,31 +245,10 @@ pub fn extract(
         }
         progress.done();
     }
-    // Type Output
-    let type_defs = types
-        .create_defs()
-        .change_context(Error::CreateTypeDefinition)?;
-    println!("Extracted {} types", type_defs.len());
-    let mut type_yaml = String::new();
-    type_yaml.push_str("enums:\n");
-    for enum_def in type_defs.values().filter_map(|x| x.as_enum()) {
-        type_yaml.push_str(&enum_def.yaml_string());
-    }
-    type_yaml.push_str("unions:\n");
-    for union_def in type_defs.values().filter_map(|x| x.as_union()) {
-        type_yaml.push_str(&union_def.yaml_string());
-    }
-    type_yaml.push_str("structs:\n");
-    for struct_def in type_defs.values().filter_map(|x| x.as_struct()) {
-        type_yaml.push_str(&struct_def.yaml_string());
-    }
-
-    // Write Output
-    let output_path_str = output_path.as_ref().display().to_string();
-    std::fs::write(output_path, type_yaml).change_context(Error::WriteFile)?;
-    println!("Output written to {}", output_path_str);
-
-    Ok(())
+    Ok(DwarfInfo {
+        address: data_types,
+        types,
+    })
 }
 
 pub fn is_type_tag(tag: DwTag) -> bool {
@@ -408,15 +371,9 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
                         .attach_printable(format!("0x{:08x} != 0x{:08x}", y, addr));
                     }
                 }
-                addr
+                Some(addr)
             }
-            None => match input_elf_addr {
-                Some(addr) => addr,
-                None => {
-                    // we don't have address to process this entry yet, will come back
-                    return Ok(());
-                }
-            },
+            None => input_elf_addr
         };
         // produce AddressInfo
         // return type
@@ -447,39 +404,90 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
             name: linkage_name.to_string(),
             info: AddrType::Func(func_info),
         };
-        // address 0 are not real
-        if addr != 0 {
-            if let Some(old_name) = elf_addr_to_name.insert(addr, linkage_name.to_string()) {
-                if old_name != linkage_name {
-                    return bad!(unit, unit.to_global_offset(offset), Error::ConflictingName)
-                        .attach_printable(format!("Function `{}`", linkage_name))
-                        .attach_printable(format!(
-                            "0x{:08x} is already assigned to `{}`",
-                            addr, old_name
-                        ));
+        // if the function has an address, check if it's conflicting
+        if let Some(addr) = addr {
+            // address 0 are not real
+            if addr != 0 {
+                if let Some(old_name) = elf_addr_to_name.insert(addr, linkage_name.to_string()) {
+                    if old_name != linkage_name {
+                        return bad!(unit, unit.to_global_offset(offset), Error::ConflictingName)
+                            .attach_printable(format!("Function `{}`", linkage_name))
+                            .attach_printable(format!(
+                                "0x{:08x} is already assigned to `{}`",
+                                addr, old_name
+                            ));
+                    }
+                }
+        }
+        }
+        if !data_type.contains_key(linkage_name) && !uking_symbols.contains_key(linkage_name) {
+            // C1/C2 and D1/D2 are equivalent, we want to check those possibilities
+            let mut alt_names = Vec::new();
+            if linkage_name.contains("C1") {
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "C1", "C2")? 
+                {
+                    alt_names.push(alt_name);
+                }
+            } 
+            if linkage_name.contains("C2") {
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "C2", "C1")? 
+                {
+                    alt_names.push(alt_name);
+                }
+            } 
+            if linkage_name.contains("D1") {
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D1", "D2")? 
+                {
+                    alt_names.push(alt_name);
+                }
+            } 
+            if linkage_name.contains("D2") {
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D2", "D1")? 
+                {
+                    alt_names.push(alt_name);
                 }
             }
-        }
-        // if there's some old info, merge it
-        if let Some(old_info) = data_type.get_mut(linkage_name) {
-            let check = old_info.check_and_merge(addr_info.clone(), types);
-            err_ctx!(
-                unit,
-                unit.to_global_offset(offset),
-                Error::ConflictingInfo,
-                check
-            )
-            .attach_printable(format!("Function `{}`", linkage_name))
-            .attach_printable(format!("Old Info: {}", old_info))
-            .attach_printable(format!("New Info: {}", addr_info))?;
-        } else {
-            if let Some(uking_address) = uking_symbols.remove(linkage_name) {
-                let mut addr_info = addr_info;
-                addr_info.uking_address = uking_address;
-                data_type.insert(linkage_name.to_string(), addr_info);
+            let mut good_alt_name = None;
+            for alt_name in alt_names {
+                if try_add_or_merge_info(
+                    unit, 
+                    &alt_name, unit.to_global_offset(offset), 
+                    addr_info.clone(), data_type, types, uking_symbols)? {
+                    if let Some(good) = good_alt_name {
+                        return bad!(unit, unit.to_global_offset(offset), Error::MultipleAltNames)
+                            .attach_printable(format!("Function `{}`", linkage_name))
+                            .attach_printable(format!("Alt Name 1: {}", good))
+                            .attach_printable(format!("Alt Name 2: {}", alt_name));
+                    }
+                    good_alt_name = Some(alt_name);
+                }
             }
-            // if there's no uking_address, it's not a symbol that we care
+        } else {
+            try_add_or_merge_info(
+                unit, 
+                linkage_name, unit.to_global_offset(offset), 
+                addr_info, data_type, types, uking_symbols)?;
         }
+        // // if there's some old info, merge it
+        // if let Some(old_info) = data_type.get_mut(linkage_name) {
+        //     let check = old_info.check_and_merge(addr_info.clone(), types);
+        //     err_ctx!(
+        //         unit,
+        //         unit.to_global_offset(offset),
+        //         Error::ConflictingInfo,
+        //         check
+        //     )
+        //     .attach_printable(format!("Function `{}`", linkage_name))
+        //     .attach_printable(format!("Old Info: {}", old_info))
+        //     .attach_printable(format!("New Info: {}", addr_info))?;
+        // } else {
+        //     if let Some(uking_address) = uking_symbols.remove(linkage_name) {
+        //         let mut addr_info = addr_info;
+        //         addr_info.uking_address = uking_address;
+        //         data_type.insert(linkage_name.to_string(), addr_info);
+        //     }
+        //     // if there's no uking_address, it's not a symbol that we care
+        // }
         return Ok(());
     }
     // no linkage_name, use other info to find the function name
@@ -525,6 +533,82 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
     Ok(())
 }
 
+fn try_get_alt_name<'d, 'i, 'a, 'u>(
+    unit: &UnitCtx<'d, 'i>,
+    entry: &DIE<'i, 'a, 'u>,
+    linkage_name: &str,
+    original: &str,
+    replace: &str
+) -> Result<Option<String>, Error> {
+    // do you have a name?
+    let name = match unit.get_entry_name_optional(entry)? {
+        Some(x) => x,
+        None => {
+            // do you have a specification?
+            match unit.get_entry_specification(entry)? {
+                Some(x) => {
+                    return try_get_alt_name(unit, &unit.entry_at(x)?, linkage_name, original, replace)
+                }
+                None => {
+                    // do you have an abstract_origin?
+                    match unit.get_entry_abstract_origin(entry)? {
+                        Some(x) => {
+                            return try_get_alt_name(unit, &unit.entry_at(x)?, linkage_name, original, replace)
+                        }
+                        None => {
+                            return Ok(None);
+                        }
+
+                    }
+                }
+            }
+        }
+    };
+    let original = format!("{}{}", name, original);
+    if linkage_name.contains(&original) {
+        let alt_name = linkage_name.replace(&original, format!("{}{}", name, replace).as_str());
+        return Ok(Some(alt_name));
+    }
+
+    Ok(None)
+}
+
+fn try_add_or_merge_info<'d, 'i>(
+    unit: &UnitCtx<'d, 'i>,
+    linkage_name: &str,
+    offset: usize,
+    addr_info: AddressInfo,
+    data_type: &mut BTreeMap<String, AddressInfo>,
+    types: &TypeStore,
+    uking_symbols: &mut BTreeMap<String, u64>,
+) -> Result<bool, Error> {
+        // if there's some old info, merge it
+    if let Some(old_info) = data_type.get_mut(linkage_name) {
+        let check = old_info.check_and_merge(addr_info.clone(), types);
+        err_ctx!(
+            unit,
+            offset,
+            Error::ConflictingInfo,
+            check
+        )
+            .attach_printable(format!("Function `{}`", linkage_name))
+            .attach_printable(format!("Old Info: {}", old_info))
+            .attach_printable(format!("New Info: {}", addr_info))?;
+        return Ok(true)
+    } else {
+        if let Some(uking_address) = uking_symbols.remove(linkage_name) {
+            let mut addr_info = addr_info;
+            addr_info.uking_address = uking_address;
+            data_type.insert(linkage_name.to_string(), addr_info);
+            return Ok(true)
+        }
+        // if there's no uking_address, it's not a symbol that we care
+    }
+
+    Ok(false)
+}
+
+
 fn read_variable<'d, 'i, 'a, 'u>(
     entry: &DIE<'i, 'a, 'u>,
     unit: &UnitCtx<'d, 'i>,
@@ -559,26 +643,10 @@ fn read_variable<'d, 'i, 'a, 'u>(
             name: linkage_name.to_string(),
             info: AddrType::Data(data_info),
         };
-        // if there's some old info, merge it
-        if let Some(old_info) = data_type.get_mut(linkage_name) {
-            let check = old_info.check_and_merge(addr_info.clone(), types);
-            err_ctx!(
-                unit,
-                unit.to_global_offset(entry.offset()),
-                Error::ConflictingInfo,
-                check
-            )
-            .attach_printable(format!("Data `{}`", linkage_name))
-            .attach_printable(format!("Old Info: {}", old_info))
-            .attach_printable(format!("New Info: {}", addr_info))?;
-        } else {
-            if let Some(uking_address) = uking_symbols.remove(linkage_name) {
-                let mut addr_info = addr_info;
-                addr_info.uking_address = uking_address;
-                data_type.insert(linkage_name.to_string(), addr_info);
-            }
-            // if there's no uking_address, it's not a symbol that we care
-        }
+        try_add_or_merge_info(
+            unit, 
+            linkage_name, unit.to_global_offset(entry.offset()), 
+            addr_info, data_type, types, uking_symbols)?;
     }
 
     // ignore no linkage name
@@ -729,9 +797,9 @@ fn read_structure_type<'d, 'i, 'a, 'u>(
         }));
     }
     let byte_size = unit.get_entry_byte_size_optional(&entry)?;
-    if byte_size == 0 {
-        return Ok(TypeInfo::Struct(StructInfo::zst()));
-    }
+    // if byte_size == 0 {
+    //     return Ok(TypeInfo::Struct(StructInfo::zst()));
+    // }
     let mut vtable = VtableInfo::default();
     let mut vdtor = None;
     let mut members = Vec::new();
@@ -934,9 +1002,9 @@ fn read_union_type<'d, 'i, 'a, 'u>(
         }));
     }
     let byte_size = unit.get_entry_byte_size(&entry)?;
-    if byte_size == 0 {
-        return Ok(TypeInfo::Struct(StructInfo::zst()));
-    }
+    // if byte_size == 0 {
+    //     return Ok(TypeInfo::Struct(StructInfo::zst()));
+    // }
     let mut members = Vec::<(Option<String>, usize)>::new();
     unit.for_each_child_entry(entry, |child| {
         let entry = child.entry();
@@ -1057,9 +1125,9 @@ fn read_enum_type<'d, 'i, 'a, 'u>(
         }
         None => unit.get_entry_byte_size(&entry)?,
     };
-    if byte_size == 0 {
-        return Ok(TypeInfo::Struct(StructInfo::zst()));
-    }
+    // if byte_size == 0 {
+    //     return Ok(TypeInfo::Struct(StructInfo::zst()));
+    // }
     let mut members = Vec::new();
     unit.for_each_child_entry(entry, |child| {
         let entry = child.entry();

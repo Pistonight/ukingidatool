@@ -641,40 +641,66 @@ impl TypeResolver {
             }
             (TypeInfo::Struct(a_struct), TypeInfo::Struct(b_struct)) => {
                 if a_struct.is_decl || b_struct.is_decl {
+                    // if a_struct.is_decl && b_struct.is_decl {
+                    //     return a_struct.name == b_struct.name;
+                    // } else if a_struct.is_decl {
+                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
+                    //         let b_ty = self.offset_to_type.get(b).unwrap();
+                    //         if let TypeInfo::Struct(b_struct) = b_ty {
+                    //             if b_struct.name == a_struct.name {
+                    //                 return true;
+                    //             }
+                    //        }
+                    //     }
+                    // } else if b_struct.is_decl {
+                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
+                    //         let a_ty = self.offset_to_type.get(a).unwrap();
+                    //         if let TypeInfo::Struct(a_struct) = a_ty {
+                    //             if a_struct.name == b_struct.name {
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // return false;
                     return a_struct.name == b_struct.name;
                 }
                 if a_struct.size != b_struct.size {
                     return false;
                 }
-                if a_struct.size == 0 {
-                    return true; // all ZSTs are equivalent
-                }
+                // if a_struct.size == 0 {
+                //     return true; // all ZSTs are equivalent
+                // }
                 if a_struct.members.len() != b_struct.members.len() {
                     return false;
                 }
                 match (&a_struct.name, &b_struct.name) {
-                    (Some(a_name), Some(b_name)) if a_name != b_name => {
+                    (Some(a_name), Some(b_name)) => {
                         // if both A and B are named, they must be the same name to be considered
                         // equivalent, otherwise non-related types with the same layout will be
                         // merged
-                        return false;
+                        if a_name != b_name {
+                            return false;
+                        }
                     }
-                    _ => {}
+                    (None, None) => {
+                        // if both doesn't have name, they are equivalent
+                    }
+                    (Some(_), None) | (None, Some(_))
+                     => {
+                        // if one of them is named, they can only be merged
+                        // if there are members
+                        // Otherwise, consider 2 empty structs A and B.
+                        // They are both equivalent to an anonymous struct with no members.
+                        // However, A and B could be totally unrelated and not decompiled yet
+                        if a_struct.members.is_empty() || a_struct.size == 0 {
+                            return false;
+                        }
+                    }
                 }
                 if !a_struct.vtable.are_equiv(&b_struct.vtable) {
                     return false;
                 }
-                // // since vtable could be incomplete, we need to check the names
-                // // instead of relying on the length
-                // for (a_name, b_name) in a_struct.vtable.iter().zip(b_struct.vtable.iter()) {
-                //     if a_name.starts_with('~') && b_name.starts_with('~') {
-                //         // dtor names might be different, it's ok
-                //         continue;
-                //     }
-                //     if a_name != b_name {
-                //         return false;
-                //     }
-                // }
                 for (a_member, b_member) in a_struct.members.iter().zip(b_struct.members.iter()) {
                     match (&a_member.name, &b_member.name) {
                         (Some(a_name), Some(b_name)) => {
@@ -695,11 +721,47 @@ impl TypeResolver {
             }
             (TypeInfo::Union(a_union), TypeInfo::Union(b_union)) => {
                 if a_union.is_decl || b_union.is_decl {
+                    // if a_union.is_decl && b_union.is_decl {
+                    //     return a_union.name == b_union.name;
+                    // } else if a_union.is_decl {
+                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
+                    //         let b_ty = self.offset_to_type.get(b).unwrap();
+                    //         if let TypeInfo::Union(b_union) = b_ty {
+                    //             if b_union.name == a_union.name {
+                    //                 return true;
+                    //             }
+                    //        }
+                    //     }
+                    // } else if b_union.is_decl {
+                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
+                    //         let a_ty = self.offset_to_type.get(a).unwrap();
+                    //         if let TypeInfo::Union(a_union) = a_ty {
+                    //             if a_union.name == b_union.name {
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // return false;
                     return a_union.name == b_union.name;
                 }
                 // both union name and union member names don't matter
                 if a_union.members.len() != b_union.members.len() {
                     return false;
+                }
+                // see above for the explanation
+                match (&a_union.name, &b_union.name) {
+                    (Some(a_name), Some(b_name)) => {
+                        if a_name != b_name {
+                            return false;
+                        }
+                    }
+                    (None, None) => { }
+                    (Some(_), None) | (None, Some(_)) => {
+                        if a_union.members.is_empty() || a_union.size == 0 {
+                            return false;
+                        }
+                    }
                 }
                 // only consider the members in order for now
                 for (a_member, b_member) in a_union.members.iter().zip(b_union.members.iter()) {
@@ -714,6 +776,28 @@ impl TypeResolver {
             }
             (TypeInfo::Enum(a_enum), TypeInfo::Enum(b_enum)) => {
                 if a_enum.is_decl || b_enum.is_decl {
+                    // if a_enum.is_decl && b_enum.is_decl {
+                    //     return a_enum.name == b_enum.name;
+                    // } else if a_enum.is_decl {
+                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
+                    //         let b_ty = self.offset_to_type.get(b).unwrap();
+                    //         if let TypeInfo::Enum(b_enum) = b_ty {
+                    //             if b_enum.name == a_enum.name {
+                    //                 return true;
+                    //             }
+                    //        }
+                    //     }
+                    // } else if b_enum.is_decl {
+                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
+                    //         let a_ty = self.offset_to_type.get(a).unwrap();
+                    //         if let TypeInfo::Enum(a_enum) = a_ty {
+                    //             if a_enum.name == b_enum.name {
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // return false;
                     return a_enum.name == b_enum.name;
                 }
                 // names matters if they don't have any enumerators
@@ -724,7 +808,8 @@ impl TypeResolver {
                                 return false;
                             }
                         }
-                        _ => (),
+                        (None, None) => { }
+                        _ => return false
                     }
                 }
 

@@ -9,6 +9,15 @@ pub struct AddressInfo {
     pub info: AddrType,
 }
 
+#[derive(Clone, Debug)]
+pub struct AddressDef {
+    pub uking_address: u64,
+    pub name: String,
+    pub is_func: bool,
+    pub ty_yaml: Option<String>,
+    pub args: Vec<(Option<String>, Option<String>)>,
+}
+
 impl std::fmt::Display for AddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x} {} {}", self.uking_address, self.name, self.info)
@@ -52,6 +61,7 @@ impl std::fmt::Display for FuncInfo {
             }
         }
         for (name, ty) in iter {
+            write!(f, ", ")?;
             if let Some(name) = name {
                 write!(f, "{}: ", name)?;
             }
@@ -187,19 +197,19 @@ impl FuncInfo {
                         .change_context(AddressInfoMismatch::Type)?
                     {
                         let a_bucket = types
-                            .get_bucket(self.ret_ty_offset)
+                            .get_bucket(*a)
                             .map(|s| format!("0x{s:08x}"))
                             .unwrap_or_else(|_| "<unknown>".to_string());
                         let b_bucket = types
-                            .get_bucket(other.ret_ty_offset)
+                            .get_bucket(*b)
                             .map(|s| format!("0x{s:08x}"))
                             .unwrap_or_else(|_| "<unknown>".to_string());
                         let a = types
-                            .get_name(self.ret_ty_offset)
+                            .get_name(*a)
                             .map(|s| s.to_string())
                             .unwrap_or_else(|_| "<unknown>".to_string());
                         let b = types
-                            .get_name(other.ret_ty_offset)
+                            .get_name(*b)
                             .map(|s| s.to_string())
                             .unwrap_or_else(|_| "<unknown>".to_string());
                         return Err(report!(AddressInfoMismatch::ParamTypeMismatch(i)))

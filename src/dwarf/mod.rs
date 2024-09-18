@@ -92,7 +92,7 @@ pub enum Error {
     UnexpectedAnonymousDeclaration,
     #[error("Unexpected virtual union")]
     UnexpectedVirtualUnion,
-    #[error("Unexpected type name for DW_TAG_unspecified_type")]
+    #[error("Unexpected type name for DW_TAG_unspecified_type. You might want to extend the match statement")]
     UnspecifiedType,
     #[error("Failed to get namespace for DIE")]
     Namespace,
@@ -129,8 +129,8 @@ pub enum Error {
     GarbageCollectType,
     #[error("Symbol looks like a decompiled symbol, but was not extracted from DWARF")]
     UnmatchedSymbol,
-    #[error("Function has multiple alt names???")]
-    MultipleAltNames,
+    #[error("Unexpected error when processing linkage name")]
+    UnexpectedLinkageName,
 }
 
 macro_rules! process_units {
@@ -225,13 +225,60 @@ pub fn extract(
                 &types,
             )?;
         });
-        for (symbol, address) in uking_symbols {
+        let mut added_symbols = Vec::new();
+        for (symbol, address) in uking_symbols.iter() {
             if symbol.starts_with("_Z") && decompiled_functions.contains(symbol) {
-                let r = report!(Error::UnmatchedSymbol)
-                    .attach_printable(format!("Symbol: {}", symbol))
-                    .attach_printable(format!("Address: 0x{:016x}", address));
-                return Err(r);
+                // we already tried to coerce ctors and dtors, but it's possible they are still not
+                // found.
+                // For example, the CSV could have both D1 and D2, while the DWARF only has D2
+                // it's probably fine to just coerce the type info
+                let mut alt_names = Vec::new();
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D1", "D2") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D1", "D0") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D2", "D1") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D2", "D0") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D0", "D1") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "D0", "D2") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "C1", "C2") {
+                        alt_names.push(n);
+                    }
+                    if let Some(n) = replace_c_or_d_name(&symbol, "C2", "C1") {
+                        alt_names.push(n);
+                    }
+                let mut found = false;
+                for n in alt_names {
+                    if let Some(info) = data_types.get(&n) {
+                        let mut info = info.clone();
+                        info.name = symbol.clone();
+                        info.uking_address = *address;
+                        data_types.insert(symbol.clone(), info);
+                        added_symbols.push(symbol.clone());
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    let r = report!(Error::UnmatchedSymbol)
+                        .attach_printable(format!("Symbol: {}", symbol))
+                        .attach_printable(format!("Address: 0x{:016x}", address));
+                    return Err(r);
+                }
             }
+        }
+        for symbol in added_symbols {
+            uking_symbols.remove(&symbol);
         }
         data_types
     };
@@ -421,7 +468,7 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
         }
         }
         if !data_type.contains_key(linkage_name) && !uking_symbols.contains_key(linkage_name) {
-            // C1/C2 and D1/D2 are equivalent, we want to check those possibilities
+            // need to check that the compiler generated different names for ctor/dtors
             let mut alt_names = Vec::new();
             if linkage_name.contains("C1") {
                 if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "C1", "C2")? 
@@ -435,31 +482,44 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
                     alt_names.push(alt_name);
                 }
             } 
+            if linkage_name.contains("D0") {
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D0", "D1")? 
+                {
+                    alt_names.push(alt_name);
+                }
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D0", "D2")? 
+                {
+                    alt_names.push(alt_name);
+                }
+            }
             if linkage_name.contains("D1") {
+                // note: pick D2 first
                 if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D1", "D2")? 
+                {
+                    alt_names.push(alt_name);
+                }
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D1", "D0")? 
                 {
                     alt_names.push(alt_name);
                 }
             } 
             if linkage_name.contains("D2") {
+                // note: pick D1 first
                 if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D2", "D1")? 
                 {
                     alt_names.push(alt_name);
                 }
+                if let Some(alt_name) = try_get_alt_name(unit, entry, linkage_name, "D2", "D0")? 
+                {
+                    alt_names.push(alt_name);
+                }
             }
-            let mut good_alt_name = None;
             for alt_name in alt_names {
                 if try_add_or_merge_info(
                     unit, 
                     &alt_name, unit.to_global_offset(offset), 
                     addr_info.clone(), data_type, types, uking_symbols)? {
-                    if let Some(good) = good_alt_name {
-                        return bad!(unit, unit.to_global_offset(offset), Error::MultipleAltNames)
-                            .attach_printable(format!("Function `{}`", linkage_name))
-                            .attach_printable(format!("Alt Name 1: {}", good))
-                            .attach_printable(format!("Alt Name 2: {}", alt_name));
-                    }
-                    good_alt_name = Some(alt_name);
+                    break;
                 }
             }
         } else {
@@ -537,8 +597,8 @@ fn try_get_alt_name<'d, 'i, 'a, 'u>(
     unit: &UnitCtx<'d, 'i>,
     entry: &DIE<'i, 'a, 'u>,
     linkage_name: &str,
-    original: &str,
-    replace: &str
+    original: &str, // C1, C2, D1, D2
+    replace: &str   // C2, C1, D2, D1
 ) -> Result<Option<String>, Error> {
     // do you have a name?
     let name = match unit.get_entry_name_optional(entry)? {
@@ -564,26 +624,72 @@ fn try_get_alt_name<'d, 'i, 'a, 'u>(
             }
         }
     };
-    let original = format!("{}{}", name, original);
-    if linkage_name.contains(&original) {
-        let alt_name = linkage_name.replace(&original, format!("{}{}", name, replace).as_str());
+    let name = if name.starts_with('~') {
+        &name[1..]
+    } else {
+        name
+    };
+
+    let name_count = name.matches(original).count();
+    let linkage_count = linkage_name.matches(original).count();
+    // generated name should have at least one more instance of original
+    if linkage_count > name_count {
+        let idx = linkage_name.rfind(original).unwrap();
+        if !name.starts_with("operator") { // bro stops with the edge cases
+            // the check below won't work for names with template in it
+            // because linkage_name doesn't have < >
+            // so we just use the first part, should still work (hopefully)
+            let name = match name.find('<') {
+                Some(x) => &name[..x],
+                None => name,
+            };
+            // this guards against the case like:
+            // linkage_name: foo::D1::Bar() (demangled)
+            // name: Bar
+            // then it's actually not a D1
+            // This won't catch all cases, but hopefully people just don't name their functions D0 D1 D2
+            match linkage_name.find(name) {
+                None => {
+                    return bad!(unit, unit.to_global_offset(entry.offset()), Error::UnexpectedLinkageName)
+                        .attach_printable("linkage_name should include name")
+                        .attach_printable(format!("linkage_name: {}", linkage_name))
+                        .attach_printable(format!("name: {}", name));
+                }
+                Some(x) => {
+                    if idx <= x {
+                        return Ok(None);
+                    }
+                }
+            };
+        }
+        let alt_name = replace_c_or_d_name(linkage_name, original, replace).unwrap();
         return Ok(Some(alt_name));
     }
 
     Ok(None)
 }
 
+fn replace_c_or_d_name(name: &str, original: &str, replace: &str) -> Option<String> {
+    let idx = name.rfind(original)?;
+    let s = format!("{}{}{}", &name[..idx], replace, &name[idx + original.len()..]);
+    Some(s)
+}
+
 fn try_add_or_merge_info<'d, 'i>(
     unit: &UnitCtx<'d, 'i>,
     linkage_name: &str,
     offset: usize,
-    addr_info: AddressInfo,
+    mut addr_info: AddressInfo,
     data_type: &mut BTreeMap<String, AddressInfo>,
     types: &TypeStore,
     uking_symbols: &mut BTreeMap<String, u64>,
 ) -> Result<bool, Error> {
-        // if there's some old info, merge it
+    // if there's some old info, merge it
     if let Some(old_info) = data_type.get_mut(linkage_name) {
+        // replace name in case an alt name is used for ctor/dtor
+        if addr_info.name != linkage_name {
+            addr_info.name = linkage_name.to_string();
+        }
         let check = old_info.check_and_merge(addr_info.clone(), types);
         err_ctx!(
             unit,
@@ -597,7 +703,10 @@ fn try_add_or_merge_info<'d, 'i>(
         return Ok(true)
     } else {
         if let Some(uking_address) = uking_symbols.remove(linkage_name) {
-            let mut addr_info = addr_info;
+            // replace name in case an alt name is used for ctor/dtor
+            if addr_info.name != linkage_name {
+                addr_info.name = linkage_name.to_string();
+            }
             addr_info.uking_address = uking_address;
             data_type.insert(linkage_name.to_string(), addr_info);
             return Ok(true)

@@ -716,6 +716,9 @@ impl TypeResolver {
                     if a_member.offset != b_member.offset {
                         return false;
                     }
+                    // not checking type for performance
+                    // if the structs have same name, size, member offset, might as well be the
+                    // same struct
                 }
                 return true;
             }

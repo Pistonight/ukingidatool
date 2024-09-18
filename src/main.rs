@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use error_stack::{Result, ResultExt};
 use parsed::{AddrType, AddressInfo, DataInfo, TypeYaml};
+use util::ProgressPrinter;
 
 mod dwarf;
 mod parsed;
@@ -47,8 +48,9 @@ fn main_inner() -> Result<(), Error> {
     let elf_path = Path::new("uking.elf");
     let mut dwarf = dwarf::extract(elf_path, &mut uking_symbols, &decompiled_functions).change_context(Error::Dwarf)?;
 
-    println!("Adding {} undecompiled symbols", uking_symbols.len());
-    for (symbol, address) in uking_symbols {
+    let progress = ProgressPrinter::new(uking_symbols.len(), "Add undecompiled symbols");
+    for (i, (symbol, address)) in uking_symbols.into_iter().enumerate() {
+        progress.print(i, format!("0x{:016x} {}", address, symbol));
         if dwarf.address.contains_key(&symbol) {
             // already processed, not possible
             panic!(
@@ -78,6 +80,7 @@ fn main_inner() -> Result<(), Error> {
             );
         }
     }
+    progress.done();
 
     let output_path = "output.yaml";
     // Type Output

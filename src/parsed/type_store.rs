@@ -145,7 +145,12 @@ impl TypeStore {
                     .attach_printable_lazy(|| format!("While marking offset: 0x{:08x}", offset))?;
             }
             TypeInfo::Struct(s) => {
-                for t in s.members.iter().map(|m| m.ty_offset).collect::<Vec<_>>() {
+                let refed = 
+                s.members.iter().map(|m| m.ty_offset).chain(
+                s.vtable
+                    .iter().flat_map(|x| std::iter::once(x.retty_offset).chain(x.argty_offsets.iter().copied()))
+                ).collect::<Vec<_>>();
+                for t in refed {
                     #[cfg(feature = "debug-type-gc")]
                     {
                         let name = self.get_name(t)?;
@@ -265,8 +270,18 @@ impl TypeStore {
     }
 
     pub fn create_defs(&self) -> Result<BTreeMap<String, TypeDef>, Error> {
+        #[derive(Default)]
+        struct NameRefMap(BTreeMap<String, BTreeSet<String>>);
+        impl NameRefMap {
+            fn add(&mut self, name: &str, refed: &TypeName) {
+                let e = self.0.entry(name.to_string()).or_default();
+                for r in refed.referenced_names() {
+                    e.insert(r.to_string());
+                }
+            }
+        }
         let progress = ProgressPrinter::new(self.referenced.len(), "Create type definitions");
-        let mut referenced_names = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut referenced_names = NameRefMap::default();
         let mut name_to_def = BTreeMap::new();
         for (i, bucket) in self.referenced.iter().enumerate() {
             progress.print(i, "");
@@ -289,12 +304,13 @@ impl TypeStore {
                                 let name =
                                     m.name.unwrap_or_else(|| format!("field_{:x}", m.offset));
                                 let ty_name = self.get_name(m.ty_offset)?;
-                                if let TypeName::Name(x) = &ty_name {
-                                    referenced_names
-                                        .entry(x.clone())
-                                        .or_default()
-                                        .insert(key.clone());
-                                }
+                                referenced_names.add(&key, &ty_name);
+                                // if let TypeName::Name(x) = &ty_name {
+                                //     referenced_names
+                                //         .entry(x.clone())
+                                //         .or_default()
+                                //         .insert(key.clone());
+                                // }
                                 let ty_yaml = ty_name.yaml_string();
                                 Ok(MemberDef {
                                     offset: m.offset,
@@ -304,9 +320,31 @@ impl TypeStore {
                                 })
                             })
                             .collect::<Result<Vec<_>, Error>>()?;
+                        let vtable = x.vtable
+                        .into_iter()
+                            .map(|vfptr| {
+                                let name = vfptr.name;
+                                let retty_name = self.get_name(vfptr.retty_offset)?;
+                                let argty_names = vfptr.argty_offsets
+                                    .iter()
+                                    .map(|&offset| {
+                                        self.get_name(offset)
+                                    })
+                                    .collect::<Result<Vec<_>, Error>>()?;
+                                let ty_name = TypeName::Comp(Box::new(TypeComp::Subroutine(
+                                    retty_name,
+                                    argty_names,
+                                )));
+                                let ty_name = TypeName::pointer(ty_name);
+                                referenced_names.add(&key, &ty_name);
+
+                                Ok((name, ty_name.yaml_string()))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+
                         TypeDef::Struct(StructDef {
                             name,
-                            vtable: x.vtable.clone(),
+                            vtable,//: todo!(), //x.vtable.clone(),
                             size: x.size,
                             members,
                         })
@@ -319,12 +357,13 @@ impl TypeStore {
                             .map(|(i, (name, offset))| {
                                 let name = name.unwrap_or_else(|| format!("_{}", i));
                                 let ty_name = self.get_name(offset)?;
-                                if let TypeName::Name(x) = &ty_name {
-                                    referenced_names
-                                        .entry(x.clone())
-                                        .or_default()
-                                        .insert(key.clone());
-                                }
+                                referenced_names.add(&key, &ty_name);
+                                // if let TypeName::Name(x) = &ty_name {
+                                //     referenced_names
+                                //         .entry(x.clone())
+                                //         .or_default()
+                                //         .insert(key.clone());
+                                // }
                                 let ty_yaml = ty_name.yaml_string();
                                 Ok((name, ty_yaml))
                             })
@@ -349,7 +388,7 @@ impl TypeStore {
             }
         }
         progress.done();
-        for (x, referers) in referenced_names {
+        for (x, referers) in referenced_names.0 {
             if !name_to_def.contains_key(&x) {
                 return Err(report!(Error::BrokenTypeRef(x.clone())))
                     .attach_printable(format!("Referenced by {:?}", referers));

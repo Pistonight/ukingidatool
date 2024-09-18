@@ -6,6 +6,14 @@ use super::unit::{err_ctx, opt_ctx};
 use super::{Error, UnitCtx, UnitOffset, DIE};
 
 impl<'d, 'i> UnitCtx<'d, 'i> {
+    /// Get the DW_AT_type converted to global offset, or `usize::MAX` if the type is void
+    pub fn get_entry_type_global_offset(&self, entry: &DIE<'i, '_, '_>) -> Result<usize, Error> {
+        match self.get_entry_type_offset_optional(entry)? {
+            Some(offset) => Ok(self.to_global_offset(offset)),
+            None => Ok(usize::MAX),
+        }
+    }
+    
     /// Get the DW_AT_type of a DIE
     pub fn get_entry_type_offset(&self, entry: &DIE<'i, '_, '_>) -> Result<UnitOffset, Error> {
         let offset = self.to_global_offset(entry.offset());

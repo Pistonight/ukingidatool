@@ -73,8 +73,8 @@ impl TypeYaml for TypeDef {
 pub struct StructDef {
     /// The name of the struct
     pub name: String,
-    /// The vtable of the struct
-    pub vtable: Vec<String>,
+    /// The vtable of the struct (name, type)
+    pub vtable: Vec<(String, String)>,
     /// The size of the struct in bytes
     pub size: usize,
     /// The members of the struct
@@ -86,8 +86,8 @@ impl TypeYaml for StructDef {
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
         if !self.vtable.is_empty() {
             s.push_str("    vtable:\n");
-            for func in &self.vtable {
-                s.push_str(&format!("      - '{}'\n", func));
+            for (func, ty) in &self.vtable {
+                s.push_str(&format!("      - {{ name: '{}', type: [ {} ] }}\n", func, ty));
             }
         }
         s.push_str("    members:\n");

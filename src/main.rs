@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use error_stack::{Result, ResultExt};
 
@@ -19,10 +20,13 @@ pub enum Error {
 }
 
 fn main() -> ExitCode {
+    let start_time = Instant::now();
     if let Err(e) = main_inner() {
         eprintln!("\nError: {:?}", e);
         return ExitCode::FAILURE;
     }
+    let elapsed = start_time.elapsed();
+    println!("Finished in {:.02} seconds", elapsed.as_secs_f32());
     ExitCode::SUCCESS
 }
 

@@ -49,6 +49,9 @@ pub fn read_uking_functions(
     for line in reader.lines() {
         let line = line.change_context(UkingParseError::ReadFile)?;
         if let Some((addr, name)) = parse_uking_function(&line)? {
+            if should_ignore_func(name) {
+                continue;
+            }
             out.insert(name.to_string(), addr);
         }
     }
@@ -78,6 +81,13 @@ fn parse_uking_function(line: &str) -> Result<Option<(u64, &str)>, UkingParseErr
             Ok(None)
         }
     }
+}
+
+fn should_ignore_func(name: &str) -> bool {
+    name.is_empty()
+        || name.starts_with("sub_")
+        || name.starts_with("nullsub_")
+        || name.starts_with("j_")
 }
 
 pub fn read_uking_data(

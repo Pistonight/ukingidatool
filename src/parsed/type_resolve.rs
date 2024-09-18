@@ -5,7 +5,7 @@ use itertools::Itertools;
 
 use error_stack::{report, Result, ResultExt};
 
-use super::{Error, NamespaceMap, TypeComp, TypeInfo, TypeName};
+use super::{Error, NamespaceMap, TypeComp, TypeInfo, TypeName, VtableInfo};
 
 use crate::util::ProgressPrinter;
 use crate::worker::Pool;
@@ -25,12 +25,12 @@ impl InputIter {
             chunk_size,
         }
     }
-    fn total(&self) -> usize {
-        let l = match self.keys.len() {
-            0 => 0,
-            n => n * (n - 1) / 2,
-        };
-        l
+    /// Factor when multiplied by to get the total number of combinations
+    fn factor(&self) -> usize {
+        match self.keys.len() {
+            0 => 1,
+            n => (n - 1) / 2,
+        }
     }
     fn next_single(&mut self) -> Option<(usize, usize)> {
         let len = self.keys.len();
@@ -236,14 +236,14 @@ impl TypeResolver {
                 break;
             }
             last_keys_len = keys.len();
+            progress.set_total(keys.len());
             let s2 = Arc::clone(s);
             let input = InputIter::new(keys, 81920);
-            let total = input.total();
+            let factor = input.factor();
             let input = input.map(move |x| (Arc::clone(&s2), x));
             progress.set_prefix(format!("{msg} (iteration {})", iteration));
-            progress.set_total(total);
             progress.reset_timer();
-            progress.print(0, "preparing");
+            progress.print(0, "");
             let pool = Pool::run(input, move |(s, keys)| {
                 let s = s.read().unwrap();
                 let len = keys.len();
@@ -253,7 +253,7 @@ impl TypeResolver {
             let mut count = 0;
             for (m, l) in pool {
                 count += l;
-                progress.print(count, "");
+                progress.print(count / factor, "");
                 for (k, v) in m {
                     let set = merge_sets.entry(k).or_insert_with(BTreeSet::new);
                     set.extend(v);
@@ -526,7 +526,7 @@ impl TypeResolver {
             .ok_or(Error::UnlinkedType(bucket))
             .attach_printable_lazy(|| format!("While getting offsets for bucket: 0x{:08x}", bucket))
     }
-    //
+
     fn find_mergeable(&self, inputs: &Vec<usize>) -> Vec<Vec<usize>> {
         let mut merge_sets = Vec::new();
         for (i, a) in inputs.iter().enumerate() {
@@ -568,15 +568,16 @@ impl TypeResolver {
 
         for (i, offsets) in self.bucket_to_offsets.values().enumerate() {
             progress.print(i, "");
-            let mut vtable = Vec::new();
+            let mut vtable = VtableInfo::default();
             for offset in offsets {
                 let ty = self.get_info(*offset)?;
                 if let TypeInfo::Struct(s) = ty {
-                    if s.vtable.len() > vtable.len() {
-                        for i in vtable.len()..s.vtable.len() {
-                            vtable.push(s.vtable[i].clone());
-                        }
-                    }
+                    vtable.merge(&s.vtable);
+                    // if s.vtable.len() > vtable.len() {
+                    //     for i in vtable.len()..s.vtable.len() {
+                    //         vtable.push(s.vtable[i].clone());
+                    //     }
+                    // }
                 }
             }
             for offset in offsets {
@@ -595,97 +596,102 @@ impl TypeResolver {
         let a_bucket = self.offset_to_bucket.get(&a_offset).unwrap();
         let b_bucket = self.offset_to_bucket.get(&b_offset).unwrap();
         if a_bucket == b_bucket {
+            // already same bucket, no need to merge
             return false;
         }
         let mut seen = HashSet::new();
-        return self.are_equiv(a_offset, b_offset, &mut seen);
+        return self.are_equiv_bucket(*a_bucket, *b_bucket, &mut seen);
+    }
+
+    fn are_equiv(
+        &self,
+        a_offset: usize,
+        b_offset: usize,
+        seen: &mut HashSet<(usize, usize)>,
+    ) -> bool {
+        let a_bucket = self.offset_to_bucket.get(&a_offset).unwrap();
+        let b_bucket = self.offset_to_bucket.get(&b_offset).unwrap();
+        return self.are_equiv_bucket(*a_bucket, *b_bucket, seen);
     }
 
     /// Perform high-level merge checks
     ///
     /// Struct and union member types are not checked
-    fn are_equiv(
+    fn are_equiv_bucket(
         &self,
-        a_offset: usize,
-        b_offset: usize,
-        memo: &mut HashSet<(usize, usize)>,
+        a_bucket: usize,
+        b_bucket: usize,
+        seen: &mut HashSet<(usize, usize)>,
     ) -> bool {
-        if a_offset > b_offset {
-            return self.are_equiv(b_offset, a_offset, memo);
-        }
-        if a_offset == b_offset {
+        if a_bucket == b_bucket {
             return true;
         }
-        if !memo.insert((a_offset, b_offset)) {
+        if a_bucket > b_bucket {
+            return self.are_equiv_bucket(b_bucket, a_bucket, seen);
+        }
+        if !seen.insert((a_bucket, b_bucket)) {
             return false;
         }
-        // if let Some(result) = memo.get(&(a_offset, b_offset)) {
-        //     return *result;
-        // }
-        // memo.insert((a_offset, b_offset), false);
-        let a_ty = self.offset_to_type.get(&a_offset).unwrap();
-        let b_ty = self.offset_to_type.get(&b_offset).unwrap();
-        let result = match (a_ty, b_ty) {
+        let a_ty = self.offset_to_type.get(&a_bucket).unwrap();
+        let b_ty = self.offset_to_type.get(&b_bucket).unwrap();
+        match (a_ty, b_ty) {
             // note: typedefs are added in make_expr_typedef
-            (TypeInfo::Prim(a_prim), TypeInfo::Prim(b_prim)) => a_prim == b_prim,
+            (TypeInfo::Prim(a_prim), TypeInfo::Prim(b_prim)) => {
+                return a_prim == b_prim;
+            }
             (TypeInfo::Struct(a_struct), TypeInfo::Struct(b_struct)) => {
                 if a_struct.is_decl || b_struct.is_decl {
                     return a_struct.name == b_struct.name;
                 }
                 if a_struct.size != b_struct.size {
-                    false
-                } else if a_struct.size == 0 {
-                    true // all ZSTs are equivalent
-                } else if a_struct.members.len() != b_struct.members.len() {
-                    false
-                } else {
-                    match (&a_struct.name, &b_struct.name) {
-                        (Some(a_name), Some(b_name)) if a_name != b_name => {
-                            // if both A and B are named, they must be the same name to be considered
-                            // equivalent, otherwise non-related types with the same layout will be
-                            // merged
-                            false
-                        }
-                        _ => {
-                            // since vtable could be incomplete, we need to check the names
-                            // instead of relying on the length
-                            for (a_name, b_name) in
-                                a_struct.vtable.iter().zip(b_struct.vtable.iter())
-                            {
-                                if a_name.starts_with('~') && b_name.starts_with('~') {
-                                    // dtor names might be different, it's ok
-                                    continue;
-                                }
-                                if a_name != b_name {
-                                    return false;
-                                }
+                    return false;
+                }
+                if a_struct.size == 0 {
+                    return true; // all ZSTs are equivalent
+                }
+                if a_struct.members.len() != b_struct.members.len() {
+                    return false;
+                }
+                match (&a_struct.name, &b_struct.name) {
+                    (Some(a_name), Some(b_name)) if a_name != b_name => {
+                        // if both A and B are named, they must be the same name to be considered
+                        // equivalent, otherwise non-related types with the same layout will be
+                        // merged
+                        return false;
+                    }
+                    _ => {}
+                }
+                if !a_struct.vtable.are_equiv(&b_struct.vtable) {
+                    return false;
+                }
+                // // since vtable could be incomplete, we need to check the names
+                // // instead of relying on the length
+                // for (a_name, b_name) in a_struct.vtable.iter().zip(b_struct.vtable.iter()) {
+                //     if a_name.starts_with('~') && b_name.starts_with('~') {
+                //         // dtor names might be different, it's ok
+                //         continue;
+                //     }
+                //     if a_name != b_name {
+                //         return false;
+                //     }
+                // }
+                for (a_member, b_member) in a_struct.members.iter().zip(b_struct.members.iter()) {
+                    match (&a_member.name, &b_member.name) {
+                        (Some(a_name), Some(b_name)) => {
+                            if a_name != b_name {
+                                return false;
                             }
-                            let mut r = true;
-                            for (a_member, b_member) in
-                                a_struct.members.iter().zip(b_struct.members.iter())
-                            {
-                                match (&a_member.name, &b_member.name) {
-                                    (Some(a_name), Some(b_name)) => {
-                                        if a_name != b_name {
-                                            r = false;
-                                            break;
-                                        }
-                                    }
-                                    _ => (),
-                                }
-                                if a_member.is_base != b_member.is_base {
-                                    r = false;
-                                    break;
-                                }
-                                if a_member.offset != b_member.offset {
-                                    r = false;
-                                    break;
-                                }
-                            }
-                            r
                         }
+                        _ => (),
+                    }
+                    if a_member.is_base != b_member.is_base {
+                        return false;
+                    }
+                    if a_member.offset != b_member.offset {
+                        return false;
                     }
                 }
+                return true;
             }
             (TypeInfo::Union(a_union), TypeInfo::Union(b_union)) => {
                 if a_union.is_decl || b_union.is_decl {
@@ -693,24 +699,18 @@ impl TypeResolver {
                 }
                 // both union name and union member names don't matter
                 if a_union.members.len() != b_union.members.len() {
-                    false
-                } else {
-                    let mut r = true;
-                    // only consider the members in order for now
-                    for (a_member, b_member) in a_union.members.iter().zip(b_union.members.iter()) {
-                        if a_member.0 != b_member.0 {
-                            r = false;
-                            break;
-                        }
-                        let a_bucket = *self.offset_to_bucket.get(&a_member.1).unwrap();
-                        let b_bucket = *self.offset_to_bucket.get(&b_member.1).unwrap();
-                        if !self.are_equiv(a_bucket, b_bucket, memo) {
-                            r = false;
-                            break;
-                        }
-                    }
-                    r
+                    return false;
                 }
+                // only consider the members in order for now
+                for (a_member, b_member) in a_union.members.iter().zip(b_union.members.iter()) {
+                    if a_member.0 != b_member.0 {
+                        return false;
+                    }
+                    if !self.are_equiv(a_member.1, b_member.1, seen) {
+                        return false;
+                    }
+                }
+                return true;
             }
             (TypeInfo::Enum(a_enum), TypeInfo::Enum(b_enum)) => {
                 if a_enum.is_decl || b_enum.is_decl {
@@ -730,97 +730,76 @@ impl TypeResolver {
 
                 // size is the byte size, so they must match
                 if a_enum.size != b_enum.size {
-                    false
-                } else if a_enum.enumerators.len() != b_enum.enumerators.len() {
-                    // number of enumerators must match
-                    false
-                } else {
-                    let mut r = true;
-                    for (a_enumerator, b_enumerator) in
-                        a_enum.enumerators.iter().zip(b_enum.enumerators.iter())
-                    {
-                        // names matter for the enumerators, otherwise unrelated enums with the
-                        // same values will be merged
-                        if a_enumerator.0 != b_enumerator.0 || a_enumerator.1 != b_enumerator.1 {
-                            r = false;
-                            break;
-                        }
-                    }
-                    r
+                    return false;
                 }
+                if a_enum.enumerators.len() != b_enum.enumerators.len() {
+                    // number of enumerators must match
+                    return false;
+                }
+                for (a_enumerator, b_enumerator) in
+                    a_enum.enumerators.iter().zip(b_enum.enumerators.iter())
+                {
+                    // names matter for the enumerators, otherwise unrelated enums with the
+                    // same values will be merged
+                    if a_enumerator != b_enumerator {
+                        return false;
+                    }
+                }
+                return true;
             }
             (TypeInfo::Comp(TypeComp::Ptr(a_ptr)), TypeInfo::Comp(TypeComp::Ptr(b_ptr))) => {
-                let a_bucket = self.offset_to_bucket.get(a_ptr).unwrap();
-                let b_bucket = self.offset_to_bucket.get(b_ptr).unwrap();
-                self.are_equiv(*a_bucket, *b_bucket, memo)
+                return self.are_equiv(*a_ptr, *b_ptr, seen)
             }
             (
                 TypeInfo::Comp(TypeComp::Array(a_t, a_count)),
                 TypeInfo::Comp(TypeComp::Array(b_t, b_count)),
             ) => {
                 if a_count != b_count {
-                    false
-                } else {
-                    let a_bucket = self.offset_to_bucket.get(a_t).unwrap();
-                    let b_bucket = self.offset_to_bucket.get(b_t).unwrap();
-                    self.are_equiv(*a_bucket, *b_bucket, memo)
+                    return false;
                 }
+                return self.are_equiv(*a_t, *b_t, seen);
             }
             (
                 TypeInfo::Comp(TypeComp::Subroutine(a_ret, a_param)),
                 TypeInfo::Comp(TypeComp::Subroutine(b_ret, b_param)),
             ) => {
-                let a_bucket = self.offset_to_bucket.get(a_ret).unwrap();
-                let b_bucket = self.offset_to_bucket.get(b_ret).unwrap();
                 if a_param.len() != b_param.len() {
-                    false
-                } else if !self.are_equiv(*a_bucket, *b_bucket, memo) {
-                    false
-                } else {
-                    let mut r = true;
-                    for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
-                        let a_bucket = self.offset_to_bucket.get(a_p).unwrap();
-                        let b_bucket = self.offset_to_bucket.get(b_p).unwrap();
-                        if !self.are_equiv(*a_bucket, *b_bucket, memo) {
-                            r = false;
-                            break;
-                        }
-                    }
-                    r
+                    return false;
                 }
+                if !self.are_equiv(*a_ret, *b_ret, seen) {
+                    return false;
+                }
+                for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
+                    if !self.are_equiv(*a_p, *b_p, seen) {
+                        return false;
+                    }
+                }
+                return true;
             }
             (
                 TypeInfo::Comp(TypeComp::Ptmf(a_this, a_ret, a_param)),
                 TypeInfo::Comp(TypeComp::Ptmf(b_this, b_ret, b_param)),
             ) => {
-                let a_bucket_this = self.offset_to_bucket.get(a_this).unwrap();
-                let b_bucket_this = self.offset_to_bucket.get(b_this).unwrap();
-                let a_bucket = self.offset_to_bucket.get(a_ret).unwrap();
-                let b_bucket = self.offset_to_bucket.get(b_ret).unwrap();
-                // ptmf are similar to subroutine, with an additional this type
                 if a_param.len() != b_param.len() {
-                    false
-                } else if !self.are_equiv(*a_bucket_this, *b_bucket_this, memo) {
-                    false
-                } else if !self.are_equiv(*a_bucket, *b_bucket, memo) {
-                    false
-                } else {
-                    let mut r = true;
-                    for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
-                        let a_bucket = self.offset_to_bucket.get(a_p).unwrap();
-                        let b_bucket = self.offset_to_bucket.get(b_p).unwrap();
-                        if !self.are_equiv(*a_bucket, *b_bucket, memo) {
-                            r = false;
-                            break;
-                        }
-                    }
-                    r
+                    return false;
                 }
-            }
-            _ => false,
-        };
+                // ptmf are similar to subroutine, with an additional this type
+                if !self.are_equiv(*a_this, *b_this, seen) {
+                    return false;
+                }
+                if !self.are_equiv(*a_ret, *b_ret, seen) {
+                    return false;
+                }
 
-        result
+                for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
+                    if !self.are_equiv_bucket(*a_p, *b_p, seen) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            _ => return false,
+        };
     }
     pub fn merge_set(&mut self, offsets: &[usize]) {
         if offsets.len() < 2 {

@@ -226,6 +226,16 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
         opt_ctx!(self, offset, Error::Namespace, map.get(&offset))
     }
 
+    /// Execute f on each child from an entry
+    pub fn for_each_child_entry<F>(&self, entry: &DIE<'i, '_, '_>, f: F) -> Result<(), Error>
+    where
+        F: for<'t> FnMut(Node<'i, '_, '_, 't>) -> Result<(), Error>,
+    {
+        let mut tree = self.tree_at(entry.offset())?;
+        let node = self.root_of(entry.offset(), &mut tree)?;
+        self.for_each_child(node, f)
+    }
+
     /// Execute f on each child
     pub fn for_each_child<F>(&self, node: Node<'i, '_, '_, '_>, mut f: F) -> Result<(), Error>
     where

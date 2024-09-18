@@ -50,7 +50,7 @@ pub struct StructInfo {
     /// If the struct is only declared, not defined
     pub is_decl: bool,
     /// The vtable of the struct. It could be incomplete before type resolution
-    pub vtable: Vec<String>,
+    pub vtable: VtableInfo,
     /// The size of the struct in bytes
     pub size: usize,
     /// The members of the struct
@@ -66,7 +66,7 @@ impl StructInfo {
         Self {
             name: Some("ZeroSizedType".to_string()),
             is_decl: false,
-            vtable: Vec::new(),
+            vtable: VtableInfo::default(),
             size: 0,
             members: Vec::new(),
         }
@@ -84,6 +84,167 @@ pub struct MemberInfo {
     pub is_base: bool,
     /// The type of the member, linked to the DWARF debug info
     pub ty_offset: usize,
+}
+
+/// Information about a vtable
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VtableInfo {
+    inner: Vec<Option<VfptrInfo>>,
+}
+
+impl VtableInfo {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Check if self and other are equivalent for type resolution
+    ///
+    /// 2 vtables are equivalent if:
+    /// - their first `min(self.len(), other.len())` entries are equivalent
+    ///
+    /// 2 entries are equivalent if:
+    /// - they are both destructors, or
+    /// - they have the same name
+    pub fn are_equiv(&self, other: &Self) -> bool {
+        // since vtable could be incomplete, we need to check the names
+        // instead of relying on the length
+        for (a, b) in self.inner.iter().zip(other.inner.iter()) {
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    if a.is_dtor() && b.is_dtor() {
+                        continue;
+                    }
+                    if a.name != b.name {
+                        return false;
+                    }
+                }
+                (None, None) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    pub fn inherit_from_base(&mut self, base_vtable: &Self) {
+        for (i, vfptr) in base_vtable.inner.iter().enumerate() {
+            let entry = self.ensure(i);
+            if entry.is_none() {
+                if let Some(vfptr) = vfptr {
+                    let mut cloned = vfptr.clone();
+                    cloned.is_from_base = true;
+                    *entry = Some(cloned);
+                } else {
+                    *entry = None;
+                }
+            }
+        }
+    }
+
+    pub fn ensure(&mut self, idx: usize) -> &mut Option<VfptrInfo> {
+        if idx >= self.inner.len() {
+            self.inner.resize(idx + 1, None);
+        }
+        &mut self.inner[idx]
+    }
+
+    /// Set the vfptr at the given index. Return false if there's already
+    /// an info set at that index, unless the old info is from base
+    /// and the new info is not from base
+    pub fn set(&mut self, idx: usize, vfptr: VfptrInfo) -> bool {
+        let entry = self.ensure(idx);
+        match entry {
+            Some(old) => {
+                if old.is_from_base && !vfptr.is_from_base {
+                    *old = vfptr;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                entry.replace(vfptr);
+                true
+            }
+        }
+    }
+
+    /// Place virtual destructors
+    ///
+    /// Looks for the first 2 adjacent entries that each is either empty or a destructor,
+    /// replace them with the given destructor info, and rename the first
+    /// one D1 and the second D0
+    pub fn place_dtor(&mut self, mut vdtorptr: VfptrInfo) {
+        let mut placement = self.inner.len();
+        for i in 0..self.inner.len() {
+            let a_can_place = self.inner[i].as_ref().map(|x| x.is_dtor()).unwrap_or(true);
+            let b_can_place = if i < self.inner.len() - 1 {
+                self.inner[i + 1]
+                    .as_ref()
+                    .map(|x| x.is_dtor())
+                    .unwrap_or(true)
+            } else {
+                true
+            };
+            if a_can_place && b_can_place {
+                placement = i;
+                break;
+            }
+        }
+        let i = placement;
+        let mut d0 = vdtorptr.clone();
+        d0.name.push_str("D0");
+        self.ensure(i + 1).replace(d0);
+        vdtorptr.name.push_str("D1");
+        self.ensure(i).replace(vdtorptr);
+    }
+
+    /// Check the vtable has any vacent entries, including at the end
+    ///
+    /// Returns the first vacant index
+    pub fn has_vacant(&self) -> Option<usize> {
+        self.inner.iter().position(|x| x.is_none())
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        if other.len() > self.len() {
+            for i in self.len()..other.len() {
+                self.inner.push(other.inner[i].clone());
+            }
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &VfptrInfo> {
+        self.inner.iter().filter_map(|x| x.as_ref())
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = VfptrInfo> {
+        if self.has_vacant().is_some() {
+            panic!("Vtables after resolving should not have None entries");
+        }
+        self.inner.into_iter().map(|x| x.unwrap())
+    }
+}
+
+/// Information about a virtual function pointer (one entry in the vtable)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VfptrInfo {
+    /// Name of the function (i.e. name of the field of the vtbl struct)
+    pub name: String,
+    /// If this entry is from a base class
+    pub is_from_base: bool,
+    /// Return type of the function
+    pub retty_offset: usize,
+    /// Argument types
+    pub argty_offsets: Vec<usize>,
+}
+impl VfptrInfo {
+    pub fn is_dtor(&self) -> bool {
+        self.name.starts_with('~')
+    }
 }
 
 /// Information about an enum

@@ -37,6 +37,36 @@ impl TypeName {
     pub fn array(to: Self, len: usize) -> Self {
         Self::Comp(Box::new(TypeComp::Array(to, len)))
     }
+    pub fn referenced_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        self.add_referenced_names(&mut names);
+        names
+    }
+    fn add_referenced_names<'a>(&'a self, names: &mut Vec<&'a str>) {
+        match self {
+            Self::Prim(_) => (),
+            Self::Name(name) => {
+                names.push(name);
+            }
+            Self::Comp(c) => match c.as_ref() {
+                TypeComp::Ptr(t) | TypeComp::Array(t, _) => t.add_referenced_names(names),
+                TypeComp::Subroutine(ret_ty, param_ty) => {
+                    ret_ty.add_referenced_names(names);
+                    for t in param_ty {
+                        t.add_referenced_names(names);
+                    }
+                }
+                TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                    this_ty.add_referenced_names(names);
+                    ret_ty.add_referenced_names(names);
+                    for t in param_ty {
+                        t.add_referenced_names(names);
+                    }
+                }
+            },
+        }
+    }
+
 }
 
 impl TypeYaml for TypeName {

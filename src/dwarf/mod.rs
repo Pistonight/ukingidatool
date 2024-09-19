@@ -100,8 +100,8 @@ pub enum Error {
     MissingVtableEntry,
     #[error("Conflicting entry in vtable")]
     ConflictingVtableEntry,
-    #[error("Conflicting address for functions")]
-    ConflictingAddress,
+    // #[error("Conflicting address for functions")]
+    // ConflictingAddress,
     #[error("Conflicting name for functions")]
     ConflictingName,
     #[error("Conflicting type for functions")]
@@ -370,7 +370,7 @@ fn pass3<'d, 'i, 'a, 'u, 't>(
                 uking_symbols,
                 elf_addr_to_name,
                 data_type,
-                None,
+                // None,
                 types,
             )?;
         }
@@ -399,32 +399,16 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
     uking_symbols: &mut BTreeMap<String, u64>,
     elf_addr_to_name: &mut BTreeMap<u64, String>,
     data_type: &mut BTreeMap<String, AddressInfo>,
-    input_elf_addr: Option<u64>,
+    // input_elf_addr: Option<u64>,
     types: &TypeStore,
 ) -> Result<(), Error> {
     let offset = entry.offset();
-    if let Some(linkage_name) = unit.get_entry_linkage_name(&entry)? {
-        let addr = match unit.get_entry_low_pc(entry)? {
-            Some(addr) => {
-                // make sure it's not conflicting with the input elf address
-                if let Some(y) = input_elf_addr {
-                    if y != addr {
-                        return bad!(
-                            unit,
-                            unit.to_global_offset(offset),
-                            Error::ConflictingAddress
-                        )
-                        .attach_printable(format!("Function `{}`", linkage_name))
-                        .attach_printable(format!("0x{:08x} != 0x{:08x}", y, addr));
-                    }
-                }
-                Some(addr)
-            }
-            None => input_elf_addr
-        };
+    if let Some(linkage_name) = read_linkage_name(entry, unit)? {
+        let addr = unit.get_entry_low_pc(entry)?;
+
         // produce AddressInfo
         // return type
-        let ret_ty = unit.get_entry_type_global_offset(&entry)?;
+        let ret_ty = read_function_type(entry, unit)?;
         let mut args = Vec::new();
         unit.for_each_child_entry(entry, |child| {
             let entry = child.entry();
@@ -528,69 +512,83 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
                 linkage_name, unit.to_global_offset(offset), 
                 addr_info, data_type, types, uking_symbols)?;
         }
-        // // if there's some old info, merge it
-        // if let Some(old_info) = data_type.get_mut(linkage_name) {
-        //     let check = old_info.check_and_merge(addr_info.clone(), types);
-        //     err_ctx!(
-        //         unit,
-        //         unit.to_global_offset(offset),
-        //         Error::ConflictingInfo,
-        //         check
-        //     )
-        //     .attach_printable(format!("Function `{}`", linkage_name))
-        //     .attach_printable(format!("Old Info: {}", old_info))
-        //     .attach_printable(format!("New Info: {}", addr_info))?;
-        // } else {
-        //     if let Some(uking_address) = uking_symbols.remove(linkage_name) {
-        //         let mut addr_info = addr_info;
-        //         addr_info.uking_address = uking_address;
-        //         data_type.insert(linkage_name.to_string(), addr_info);
-        //     }
-        //     // if there's no uking_address, it's not a symbol that we care
-        // }
         return Ok(());
+    }
+    // // no linkage_name, use other info to find the function name
+    // if let Some(abstract_origin) = unit.get_entry_abstract_origin(entry)? {
+    //     let origin_entry = unit.entry_at(abstract_origin)?;
+    //     let addr = match unit.get_entry_low_pc(&entry)? {
+    //         None => {
+    //             // not enough info, skip
+    //             return Ok(());
+    //         }
+    //         Some(addr) => addr,
+    //     };
+    //     return read_subprogram(
+    //         &origin_entry,
+    //         unit,
+    //         uking_symbols,
+    //         elf_addr_to_name,
+    //         data_type,
+    //         Some(addr),
+    //         types,
+    //     );
+    // }
+    // if let Some(specification) = unit.get_entry_specification(entry)? {
+    //     let origin_entry = unit.entry_at(specification)?;
+    //     let addr = match unit.get_entry_low_pc(&entry)? {
+    //         None => {
+    //             // not enough info, skip
+    //             return Ok(());
+    //         }
+    //         Some(addr) => addr,
+    //     };
+    //     return read_subprogram(
+    //         &origin_entry,
+    //         unit,
+    //         uking_symbols,
+    //         elf_addr_to_name,
+    //         data_type,
+    //         Some(addr),
+    //         types,
+    //     );
+    // }
+    // ones that don't have name shouldn't matter
+    Ok(())
+}
+
+fn read_linkage_name<'d, 'i, 'a, 'u>(
+    entry: &DIE<'i, 'a, 'u>,
+    unit: &UnitCtx<'d, 'i>,
+) -> Result<Option<&'i str>, Error> {
+    if let Some(linkage_name) = unit.get_entry_linkage_name(entry)? {
+        return Ok(Some(linkage_name));
     }
     // no linkage_name, use other info to find the function name
     if let Some(abstract_origin) = unit.get_entry_abstract_origin(entry)? {
         let origin_entry = unit.entry_at(abstract_origin)?;
-        let addr = match unit.get_entry_low_pc(&entry)? {
-            None => {
-                // not enough info, skip
-                return Ok(());
-            }
-            Some(addr) => addr,
-        };
-        return read_subprogram(
-            &origin_entry,
-            unit,
-            uking_symbols,
-            elf_addr_to_name,
-            data_type,
-            Some(addr),
-            types,
-        );
+        return read_linkage_name(&origin_entry, unit);
     }
     if let Some(specification) = unit.get_entry_specification(entry)? {
         let origin_entry = unit.entry_at(specification)?;
-        let addr = match unit.get_entry_low_pc(&entry)? {
-            None => {
-                // not enough info, skip
-                return Ok(());
-            }
-            Some(addr) => addr,
-        };
-        return read_subprogram(
-            &origin_entry,
-            unit,
-            uking_symbols,
-            elf_addr_to_name,
-            data_type,
-            Some(addr),
-            types,
-        );
+        return read_linkage_name(&origin_entry, unit);
     }
     // ones that don't have name shouldn't matter
-    Ok(())
+    Ok(None)
+}
+fn read_function_type<'d, 'i, 'a, 'u>(
+    entry: &DIE<'i, 'a, 'u>,
+    unit: &UnitCtx<'d, 'i>,
+) -> Result<usize, Error> {
+    if let Some(specification) = unit.get_entry_specification(entry)? {
+        let origin_entry = unit.entry_at(specification)?;
+        return read_function_type(&origin_entry, unit);
+    }
+    if let Some(abstract_origin) = unit.get_entry_abstract_origin(entry)? {
+        let origin_entry = unit.entry_at(abstract_origin)?;
+        return read_function_type(&origin_entry, unit);
+    }
+    unit.get_entry_type_global_offset(entry)
 }
 
 fn try_get_alt_name<'d, 'i, 'a, 'u>(

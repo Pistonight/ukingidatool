@@ -3,8 +3,8 @@ use std::thread::{self, JoinHandle};
 
 pub fn num_threads() -> usize {
     match num_cpus::get() {
-        0..3 => 1,
-        n => n - 2,
+        0 => 1,
+        n => n,
     }
 }
 

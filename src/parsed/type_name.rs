@@ -14,19 +14,19 @@ pub enum TypeName {
 }
 
 impl TypeName {
-    pub fn anonymous_struct(offset: usize, ns: &NamespaceMap) -> Result<Self, Error> {
-        Self::anonymous(offset, ns, "struct")
+    pub fn anonymous_struct(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+        Self::anonymous(offset, ns, "struct", hash)
     }
-    pub fn anonymous_enum(offset: usize, ns: &NamespaceMap) -> Result<Self, Error> {
-        Self::anonymous(offset, ns, "enum")
+    pub fn anonymous_enum(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+        Self::anonymous(offset, ns, "enum", hash)
     }
-    pub fn anonymous_union(offset: usize, ns: &NamespaceMap) -> Result<Self, Error> {
-        Self::anonymous(offset, ns, "union")
+    pub fn anonymous_union(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+        Self::anonymous(offset, ns, "union", hash)
     }
     /// Create an anonymous type name
-    fn anonymous(offset: usize, ns: &NamespaceMap, tag: &str) -> Result<Self, Error> {
+    fn anonymous(offset: usize, ns: &NamespaceMap, tag: &str, hash: u64) -> Result<Self, Error> {
         let name = ns
-            .get(offset, &format!("anonymous_{}", tag))
+            .get(offset, &format!("anonymous_{}x{:016x}", tag, hash))
             .attach_printable_lazy(|| format!("While creating anonymous {}", tag))?;
         Ok(Self::Name(name))
     }
@@ -37,16 +37,16 @@ impl TypeName {
     pub fn array(to: Self, len: usize) -> Self {
         Self::Comp(Box::new(TypeComp::Array(to, len)))
     }
-    pub fn referenced_names(&self) -> Vec<&str> {
+    pub fn referenced_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         self.add_referenced_names(&mut names);
         names
     }
-    fn add_referenced_names<'a>(&'a self, names: &mut Vec<&'a str>) {
+    fn add_referenced_names<'a>(&'a self, names: &mut Vec<String>) {
         match self {
             Self::Prim(_) => (),
             Self::Name(name) => {
-                names.push(name);
+                names.push(name.to_string());
             }
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) | TypeComp::Array(t, _) => t.add_referenced_names(names),
@@ -57,6 +57,12 @@ impl TypeName {
                     }
                 }
                 TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                    // ptmf also needs the _ptmf struct
+                    if let Self::Name(name) = this_ty {
+                        names.push(format!("{}_ptmf", name));
+                    } else {
+                        panic!("ptmf of non-name type: {:?}", this_ty);
+                    }
                     this_ty.add_referenced_names(names);
                     ret_ty.add_referenced_names(names);
                     for t in param_ty {
@@ -117,20 +123,19 @@ impl std::fmt::Display for TypeComp<TypeName> {
 impl TypeName {
     /// Return if this type name is primitive, or composed of primitive types
     pub fn is_primitive(&self) -> bool {
-        //, name: &BTreeMap<usize, TypeName>) -> bool {
         match self {
             Self::Prim(_) => true,
             Self::Comp(c) => match c.as_ref() {
-                TypeComp::Ptr(t) => t.is_primitive(), //name.get(t).unwrap().is_primitive(name),
-                TypeComp::Array(t, _) => t.is_primitive(), //name.get(t).unwrap().is_primitive(name),
+                TypeComp::Ptr(t) => t.is_primitive(),
+                TypeComp::Array(t, _) => t.is_primitive(),
                 TypeComp::Subroutine(ret_ty, param_ty) => {
-                    ret_ty.is_primitive()//name.get(ret_ty).unwrap().is_primitive(name)
-                        && param_ty.iter().all(|t| t.is_primitive()) //name.get(t).unwrap().is_primitive(name))
+                    ret_ty.is_primitive()
+                        && param_ty.iter().all(|t| t.is_primitive())
                 }
                 TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                    this_ty.is_primitive()//name.get(this_ty).unwrap().is_primitive(name)
-                        && ret_ty.is_primitive()//name.get(ret_ty).unwrap().is_primitive(name)
-                        && param_ty.iter().all(|t| t.is_primitive()) //name.get(t).unwrap().is_primitive(name))
+                    this_ty.is_primitive()
+                        && ret_ty.is_primitive()
+                        && param_ty.iter().all(|t| t.is_primitive())
                 }
             },
             _ => false,
@@ -139,7 +144,6 @@ impl TypeName {
 
     /// Count the number of anonymous types in this type name
     pub fn count_anonymous(&self) -> usize {
-        //, name: &BTreeMap<usize, TypeName>) -> usize {
         match self {
             Self::Prim(_) => 0,
             Self::Name(s) => {
@@ -150,18 +154,16 @@ impl TypeName {
                 }
             }
             Self::Comp(c) => match c.as_ref() {
-                TypeComp::Ptr(t) => t.count_anonymous(), //name.get(t).unwrap().count_anonymous(name),
-                TypeComp::Array(t, _) => t.count_anonymous(), //name
+                TypeComp::Ptr(t) => t.count_anonymous(),
+                TypeComp::Array(t, _) => t.count_anonymous(),
                 TypeComp::Subroutine(ret_ty, param_ty) => {
-                    ret_ty.count_anonymous()//name.get(ret_ty).unwrap().count_anonymous(name)
+                    ret_ty.count_anonymous()
                         + param_ty.iter().map(|t| t.count_anonymous()).sum::<usize>()
-                    //name.get(t).unwrap().count_anonymous(name)).sum::<usize>()
                 }
                 TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                    this_ty.count_anonymous()//name.get(this_ty).unwrap().count_anonymous(name)
-                        + ret_ty.count_anonymous()//name.get(ret_ty).unwrap().count_anonymous(name)
+                    this_ty.count_anonymous()
+                        + ret_ty.count_anonymous()
                         + param_ty.iter().map(|t| t.count_anonymous()).sum::<usize>()
-                    //name.get(t).unwrap().count_anonymous(name)).sum::<usize>()
                 }
             },
         }
@@ -192,8 +194,6 @@ impl TypeName {
                     TypeComp::Ptr(t) | TypeComp::Array(t, _) => {
                         match other_c.as_ref() {
                             TypeComp::Ptr(t_c) | TypeComp::Array(t_c, _) => {
-                                // let t_ty = name.get(t).unwrap();
-                                // let t_c_ty = name.get(t_c).unwrap();
                                 return t.is_preferred_over(t_c);
                             }
                             // prefer more compounded types
@@ -260,8 +260,6 @@ impl TypeName {
                                             .chain(param_ty_c.iter()),
                                     );
                                 for (t, t_c) in ty_iter {
-                                    // let t_ty = name.get(t).unwrap();
-                                    // let t_c_ty = name.get(t_c).unwrap();
                                     match t.is_preferred_over(t_c) {
                                         std::cmp::Ordering::Less => {
                                             if more_count > 0 {
@@ -307,12 +305,14 @@ impl TypeName {
             }
             Self::Name(x) => x,
         };
-
         // prefer less whitespace
         let self_spaces = self_name.chars().filter(|c| c.is_whitespace()).count();
         let other_spaces = other_name.chars().filter(|c| c.is_whitespace()).count();
         if self_spaces < other_spaces {
             return std::cmp::Ordering::Greater;
+        }
+        if self_spaces > other_spaces {
+            return std::cmp::Ordering::Less;
         }
 
         // prefer less < >
@@ -324,11 +324,28 @@ impl TypeName {
         if self_angle < other_angle {
             return std::cmp::Ordering::Greater;
         }
-        // prefer ksys/uking
-        let self_ksys = self_name.starts_with("ksys") || self_name.starts_with("uking");
-        let other_ksys = other_name.starts_with("ksys") || other_name.starts_with("uking");
+        if self_angle > other_angle {
+            return std::cmp::Ordering::Less;
+        }
+
+        // prefer ksys
+        let self_ksys = self_name.starts_with("ksys");
+        let other_ksys = other_name.starts_with("ksys");
         if self_ksys && !other_ksys {
             return std::cmp::Ordering::Greater;
+        }
+        if !self_ksys && other_ksys {
+            return std::cmp::Ordering::Less;
+        }
+
+        // prefer uking
+        let self_ksys = self_name.starts_with("uking");
+        let other_ksys = other_name.starts_with("uking");
+        if self_ksys && !other_ksys {
+            return std::cmp::Ordering::Greater;
+        }
+        if !self_ksys && other_ksys {
+            return std::cmp::Ordering::Less;
         }
 
         // prefer sead
@@ -337,6 +354,9 @@ impl TypeName {
         if self_sead && !other_sead {
             return std::cmp::Ordering::Greater;
         }
+        if !self_sead && other_sead {
+            return std::cmp::Ordering::Less;
+        }
 
         // prefer nn
         let self_nn = self_name.starts_with("nn");
@@ -344,16 +364,23 @@ impl TypeName {
         if self_nn && !other_nn {
             return std::cmp::Ordering::Greater;
         }
-
-        // prefer std
-        if self_name.starts_with("std::") && !other_name.starts_with("std::") {
-            return std::cmp::Ordering::Greater;
+        if !self_nn && other_nn {
+            return std::cmp::Ordering::Less;
         }
+
 
         // prefer fewer underscores
         let self_underscores = self_name.chars().filter(|c| *c == '_').count();
         let other_underscores = other_name.chars().filter(|c| *c == '_').count();
         if self_underscores < other_underscores {
+            return std::cmp::Ordering::Greater;
+        }
+        if self_underscores > other_underscores {
+            return std::cmp::Ordering::Less;
+        }
+
+        // prefer std
+        if self_name.starts_with("std::") && !other_name.starts_with("std::") {
             return std::cmp::Ordering::Greater;
         }
 

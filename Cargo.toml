@@ -1,5 +1,5 @@
 [package]
-name = "uking2ida"
+name = "ukingidatool"
 version = "0.1.0"
 edition = "2021"
 
@@ -16,3 +16,4 @@ thiserror = "1.0.63"
 default = []
 debug-resolve-name = [] # Debug name resolution algorithm
 debug-type-gc = [] # Debug type garbage collection algorithm
+debug-layout = [] # Debug layout optimization handling (tail padding and empty base)

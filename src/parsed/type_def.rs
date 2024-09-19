@@ -90,10 +90,12 @@ impl TypeYaml for StructDef {
                 s.push_str(&format!("      - {{ name: '{}', type: [ {} ] }}\n", func, ty));
             }
         }
-        s.push_str("    members:\n");
-        for member in &self.members {
-            s.push_str(&member.yaml_string());
-            s.push_str("\n");
+        if !self.members.is_empty() {
+            s.push_str("    members:\n");
+            for member in &self.members {
+                s.push_str(&member.yaml_string());
+                s.push_str("\n");
+            }
         }
         s
     }
@@ -138,12 +140,14 @@ impl TypeYaml for EnumDef {
     fn yaml_string(&self) -> String {
         let mut s = format!("  - name: '{}'\n", self.name);
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
-        s.push_str("    enumerators:\n");
-        for (name, val) in &self.enumerators {
-            if *val >= 0 {
-                s.push_str(&format!("      {name}: 0x{val:x}\n"))
-            } else {
-                s.push_str(&format!("      {name}: {val}\n"))
+        if !self.enumerators.is_empty() {
+            s.push_str("    enumerators:\n");
+            for (name, val) in &self.enumerators {
+                if *val >= 0 {
+                    s.push_str(&format!("      {name}: 0x{val:x}\n"))
+                } else {
+                    s.push_str(&format!("      {name}: {val}\n"))
+                }
             }
         }
         s
@@ -164,9 +168,11 @@ impl TypeYaml for UnionDef {
     fn yaml_string(&self) -> String {
         let mut s = format!("  - name: '{}'\n", self.name);
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
-        s.push_str("    members:\n");
-        for (name, ty) in &self.members {
-            s.push_str(&format!("      {name}: [ {ty} ]\n"))
+        if !self.members.is_empty() {
+            s.push_str("    members:\n");
+            for (name, ty) in &self.members {
+                s.push_str(&format!("      {name}: [ {ty} ]\n"))
+            }
         }
         s
     }

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 use itertools::Itertools;
@@ -96,7 +97,7 @@ impl TypeResolver {
     }
 
     pub fn merge_pass1(s: &Arc<RwLock<Self>>) {
-        Self::merge_pass_by_filter(s, 8192, 0.1, |_| true, "Deduplicate types pass 1");
+        Self::merge_pass_by_filter(s, 8192, 0.05, |_| true, "Deduplicate types pass 1");
     }
 
     pub fn merge_primitives(s: &Arc<RwLock<Self>>) {
@@ -176,10 +177,12 @@ impl TypeResolver {
                 let s = s.read().unwrap();
                 let mut keys_chunked = Vec::new();
                 let filtered = s.filtered_buckets(&filter);
+                let len = filtered.len();
+                let window = window.min(len / crate::worker::num_threads());
                 for chunk in &filtered.into_iter().chunks(window) {
                     keys_chunked.push(chunk.collect::<Vec<_>>());
                 }
-                (keys_chunked, s.bucket_to_offsets.len())
+                (keys_chunked, len)
             };
             progress.set_total(total);
             progress.set_prefix(format!("{msg} (iteration {})", iteration));
@@ -215,10 +218,10 @@ impl TypeResolver {
                 if ((total - after) as f64 / total as f64) < threshold {
                     break;
                 }
-                if window * crate::worker::num_threads() > after {
-                    // can no longer take 100% advantage of CPU
-                    break;
-                }
+                // if window * crate::worker::num_threads() > after {
+                //     // can no longer take 100% advantage of CPU
+                //     break;
+                // }
             }
         }
         progress.done();
@@ -291,15 +294,24 @@ impl TypeResolver {
                     TypeInfo::Typedef(name, _) => Ok(TypeName::Name(name.clone())),
                     TypeInfo::Struct(x) => match &x.name {
                         Some(name) => Ok(TypeName::Name(name.clone())),
-                        None => TypeName::anonymous_struct(*offset, namespaces),
+                        None =>  {
+                            let hash = hash_members(x.members.iter().map(|x|x.name.as_deref().unwrap_or("anonymous")));
+                            TypeName::anonymous_struct(*offset, namespaces, hash)
+                        }
                     },
                     TypeInfo::Enum(x) => match &x.name {
                         Some(name) => Ok(TypeName::Name(name.clone())),
-                        None => TypeName::anonymous_enum(*offset, namespaces),
+                        None => {
+                            let hash = hash_members(x.enumerators.iter().map(|x|x.0.as_str()));
+                            TypeName::anonymous_enum(*offset, namespaces, hash)
+                        }
                     },
                     TypeInfo::Union(x) => match &x.name {
                         Some(name) => Ok(TypeName::Name(name.clone())),
-                        None => TypeName::anonymous_union(*offset, namespaces),
+                        None => {
+                            let hash = hash_members(x.members.iter().map(|x|x.0.as_deref().unwrap_or("anonymous")));
+                            TypeName::anonymous_union(*offset, namespaces, hash)
+                        }
                     },
                     _ => return None,
                 };
@@ -342,20 +354,24 @@ impl TypeResolver {
                                 .unwrap_or_else(|| {
                                     let r = match self.get_info(*offset)? {
                                         TypeInfo::Prim(t) => TypeName::Prim(*t),
-                                        TypeInfo::Struct(x) => match &x.name {
-                                            Some(name) => TypeName::Name(name.clone()),
-                                            None => {
-                                                TypeName::anonymous_struct(*offset, namespaces)?
-                                            }
-                                        },
-                                        TypeInfo::Enum(x) => match &x.name {
-                                            Some(name) => TypeName::Name(name.clone()),
-                                            None => TypeName::anonymous_enum(*offset, namespaces)?,
-                                        },
-                                        TypeInfo::Union(x) => match &x.name {
-                                            Some(name) => TypeName::Name(name.clone()),
-                                            None => TypeName::anonymous_union(*offset, namespaces)?,
-                                        },
+                                        TypeInfo::Struct(_) => unreachable!(),
+                                        // match &x.name {
+                                        //     Some(name) => TypeName::Name(name.clone()),
+                                        //     None => {
+                                        //         let hash = hash_members(x.members.iter().map(|x|x.name.as_deref().unwrap_or("anonymous")));
+                                        //         TypeName::anonymous_struct(*offset, namespaces)?
+                                        //     }
+                                        // },
+                                        TypeInfo::Enum(_) => unreachable!(),
+                                        // match &x.name {
+                                        //     Some(name) => TypeName::Name(name.clone()),
+                                        //     None => TypeName::anonymous_enum(*offset, namespaces)?,
+                                        // },
+                                        TypeInfo::Union(_) => unreachable!(),
+                                        // match &x.name {
+                                        //     Some(name) => TypeName::Name(name.clone()),
+                                        //     None => TypeName::anonymous_union(*offset, namespaces)?,
+                                        // },
                                         TypeInfo::Typedef(name, _) => TypeName::Name(name.clone()),
                                         // composite types are only resolvable if
                                         // their components are resolvable
@@ -430,19 +446,33 @@ impl TypeResolver {
                     #[cfg(feature = "debug-resolve-name")]
                     {
                         let name_str = name.to_string();
-                        if !name_str.starts_with("anon_0x") {
+                        if !name_str.contains("anonymous") {
                             all_names.insert(name_str);
                         }
                     }
                     match &mut best_name {
                         Some(n) => {
-                            if name.is_preferred_over(&n) == std::cmp::Ordering::Greater {
-                                // best_offset = Some(offset);
+                            if name.is_preferred_over(n) == std::cmp::Ordering::Greater {
+                                #[cfg(feature = "debug-resolve-name")]
+                                {
+                                    let old_str = n.to_string();
+                                    let new_str = name.to_string();
+                                    if !new_str.contains("anonymous") {
+                                        println!("Prefer: {} -> {}", new_str, old_str);
+                                        println!("  {:?} -> {:?}", name, n);
+                                    }
+                                }
                                 best_name = Some(name.clone());
                             }
                         }
                         None => {
-                            // best_offset = Some(offset);
+                            #[cfg(feature = "debug-resolve-name")]
+                            {
+                                let name_str = name.to_string();
+                                if !name_str.contains("anonymous") {
+                                    println!("Using: {}", name_str);
+                                }
+                            }
                             best_name = Some(name.clone());
                         }
                     }
@@ -503,6 +533,69 @@ impl TypeResolver {
         Ok(bucket_to_name)
     }
 
+    pub fn resolve_sizes(&self) -> Result<BTreeMap<usize, usize>, Error> {
+        let mut bucket_to_sizes = BTreeMap::new();
+        loop {
+            let last_len = bucket_to_sizes.len();
+            'outer: for (bucket, offsets) in &self.bucket_to_offsets {
+                // find the first type that has a size
+                for offset in offsets {
+                    let ty = self.get_info(*offset)?;
+                    let size = match ty {
+                        TypeInfo::Prim(p) => {
+                            if let Some(size) = p.size() {
+                                size
+                            } else {
+                                continue;
+                            }
+                        }
+                        TypeInfo::Typedef(_,_) => continue,
+                        TypeInfo::Enum(e) => {
+                            if e.is_decl {
+                                continue;
+                            }
+                            e.size
+                        }
+                        TypeInfo::Struct(s) => {
+                            if s.is_decl {
+                                continue;
+                            }
+                            s.size
+                        }
+                        TypeInfo::Union(u) => {
+                            if u.is_decl {
+                                continue;
+                            }
+                            u.size
+                        }
+                        TypeInfo::Comp(TypeComp::Ptr(_)) => 8,
+                        TypeInfo::Comp(TypeComp::Ptmf(_,_,_)) => 16,
+                        TypeInfo::Comp(TypeComp::Array(t, len)) => {
+                            let bucket = self.get_bucket(*t)?;
+                            if let Some(size) = bucket_to_sizes.get(&bucket) {
+                                size * len
+                            } else {
+                                // can't calculate array size yet
+                                continue 'outer;
+                            }
+                        }
+                        TypeInfo::Comp(TypeComp::Subroutine(_, _)) => {
+                            // subroutine types don't have size,
+                            // only pointers do
+                            continue;
+                        }
+                    };
+                    bucket_to_sizes.insert(*bucket, size);
+                    continue 'outer;
+                }
+            }
+            if last_len == bucket_to_sizes.len() {
+                break;
+            }
+        }
+        Ok(bucket_to_sizes)
+    }
+
     pub fn get_bucket(&self, offset: usize) -> Result<usize, Error> {
         self.offset_to_bucket
             .get(&offset)
@@ -547,6 +640,7 @@ impl TypeResolver {
         }
         merge_sets
     }
+
     fn find_mergeable2(&self, inputs: &Vec<(usize, usize)>) -> BTreeMap<usize, Vec<usize>> {
         let mut merge_sets = BTreeMap::new();
         for (a, b) in inputs {
@@ -573,11 +667,6 @@ impl TypeResolver {
                 let ty = self.get_info(*offset)?;
                 if let TypeInfo::Struct(s) = ty {
                     vtable.merge(&s.vtable);
-                    // if s.vtable.len() > vtable.len() {
-                    //     for i in vtable.len()..s.vtable.len() {
-                    //         vtable.push(s.vtable[i].clone());
-                    //     }
-                    // }
                 }
             }
             for offset in offsets {
@@ -641,36 +730,11 @@ impl TypeResolver {
             }
             (TypeInfo::Struct(a_struct), TypeInfo::Struct(b_struct)) => {
                 if a_struct.is_decl || b_struct.is_decl {
-                    // if a_struct.is_decl && b_struct.is_decl {
-                    //     return a_struct.name == b_struct.name;
-                    // } else if a_struct.is_decl {
-                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
-                    //         let b_ty = self.offset_to_type.get(b).unwrap();
-                    //         if let TypeInfo::Struct(b_struct) = b_ty {
-                    //             if b_struct.name == a_struct.name {
-                    //                 return true;
-                    //             }
-                    //        }
-                    //     }
-                    // } else if b_struct.is_decl {
-                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
-                    //         let a_ty = self.offset_to_type.get(a).unwrap();
-                    //         if let TypeInfo::Struct(a_struct) = a_ty {
-                    //             if a_struct.name == b_struct.name {
-                    //                 return true;
-                    //             }
-                    //         }
-                    //     }
-                    // }
-                    // return false;
                     return a_struct.name == b_struct.name;
                 }
                 if a_struct.size != b_struct.size {
                     return false;
                 }
-                // if a_struct.size == 0 {
-                //     return true; // all ZSTs are equivalent
-                // }
                 if a_struct.members.len() != b_struct.members.len() {
                     return false;
                 }
@@ -716,36 +780,15 @@ impl TypeResolver {
                     if a_member.offset != b_member.offset {
                         return false;
                     }
-                    // not checking type for performance
-                    // if the structs have same name, size, member offset, might as well be the
-                    // same struct
+                    // types must be checked as well
+                    if !self.are_equiv(a_member.ty_offset, b_member.ty_offset, seen) {
+                        return false;
+                    }
                 }
                 return true;
             }
             (TypeInfo::Union(a_union), TypeInfo::Union(b_union)) => {
                 if a_union.is_decl || b_union.is_decl {
-                    // if a_union.is_decl && b_union.is_decl {
-                    //     return a_union.name == b_union.name;
-                    // } else if a_union.is_decl {
-                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
-                    //         let b_ty = self.offset_to_type.get(b).unwrap();
-                    //         if let TypeInfo::Union(b_union) = b_ty {
-                    //             if b_union.name == a_union.name {
-                    //                 return true;
-                    //             }
-                    //        }
-                    //     }
-                    // } else if b_union.is_decl {
-                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
-                    //         let a_ty = self.offset_to_type.get(a).unwrap();
-                    //         if let TypeInfo::Union(a_union) = a_ty {
-                    //             if a_union.name == b_union.name {
-                    //                 return true;
-                    //             }
-                    //         }
-                    //     }
-                    // }
-                    // return false;
                     return a_union.name == b_union.name;
                 }
                 // both union name and union member names don't matter
@@ -779,28 +822,6 @@ impl TypeResolver {
             }
             (TypeInfo::Enum(a_enum), TypeInfo::Enum(b_enum)) => {
                 if a_enum.is_decl || b_enum.is_decl {
-                    // if a_enum.is_decl && b_enum.is_decl {
-                    //     return a_enum.name == b_enum.name;
-                    // } else if a_enum.is_decl {
-                    //     for b in self.bucket_to_offsets.get(&b_bucket).unwrap() {
-                    //         let b_ty = self.offset_to_type.get(b).unwrap();
-                    //         if let TypeInfo::Enum(b_enum) = b_ty {
-                    //             if b_enum.name == a_enum.name {
-                    //                 return true;
-                    //             }
-                    //        }
-                    //     }
-                    // } else if b_enum.is_decl {
-                    //     for a in self.bucket_to_offsets.get(&a_bucket).unwrap() {
-                    //         let a_ty = self.offset_to_type.get(a).unwrap();
-                    //         if let TypeInfo::Enum(a_enum) = a_ty {
-                    //             if a_enum.name == b_enum.name {
-                    //                 return true;
-                    //             }
-                    //         }
-                    //     }
-                    // }
-                    // return false;
                     return a_enum.name == b_enum.name;
                 }
                 // names matters if they don't have any enumerators
@@ -933,4 +954,16 @@ impl TypeResolver {
             .unwrap()
             .extend(b_offsets);
     }
+}
+
+
+/// hash members for anonymous types so they don't conflict
+fn hash_members<'a>(members: impl Iterator<Item = &'a str>) -> u64{
+    let mut string_for_hash = String::new();
+    for m in members {
+        string_for_hash.push_str(&format!("{}{}", m.len(), m));
+    }
+    let mut hasher = DefaultHasher::new();
+    string_for_hash.hash(&mut hasher);
+    hasher.finish()
 }

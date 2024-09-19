@@ -216,7 +216,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "uking2ida"
+name = "ukingidatool"
 version = "0.1.0"
 dependencies = [
  "elf",

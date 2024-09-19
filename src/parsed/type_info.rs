@@ -57,22 +57,6 @@ pub struct StructInfo {
     pub members: Vec<MemberInfo>,
 }
 
-impl StructInfo {
-    // /// Create a true zero-sized type
-    // ///
-    // /// zero-sized types in C++ typically have a size of 1 byte, so
-    // /// this is not that. This is a type that truly is 0 bytes
-    // pub fn zst() -> Self {
-    //     Self {
-    //         name: Some("ZeroSizedType".to_string()),
-    //         is_decl: false,
-    //         vtable: VtableInfo::default(),
-    //         size: 0,
-    //         members: Vec::new(),
-    //     }
-    // }
-}
-
 /// Information about a member of a struct
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberInfo {

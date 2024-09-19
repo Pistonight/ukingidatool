@@ -1,5 +1,7 @@
 mod address;
 pub use address::*;
+// mod layout;
+// pub use layout::*;
 mod namespace;
 pub use namespace::*;
 mod type_def;
@@ -23,10 +25,16 @@ pub enum Error {
     ResolveName,
     #[error("Unresolved name")]
     UnresolvedName,
+    #[error("Unresolved size")]
+    UnresolvedSize,
+    #[error("Types with the same name have different definitions")]
+    ConflictingType,
     #[error("Namespace not found: 0x{0:08x}")]
     UnlinkedNamespace(usize),
     #[error("Type not found: 0x{0:08x}")]
     UnlinkedType(usize),
     #[error("Type `{0}` is referenced but not actually generated")]
     BrokenTypeRef(String),
+    #[error("Invalid member layout for struct")]
+    InvalidLayout,
 }

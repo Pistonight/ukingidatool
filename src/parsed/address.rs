@@ -1,26 +1,141 @@
+use std::collections::BTreeMap;
+
 use error_stack::{report, Result, ResultExt};
 
-use super::{Error, TypeStore};
+use super::{Error, TypeDef, TypeStore, TypeYaml};
 
+/// Information about symbol at an address, linked to type offsets in DWARF
 #[derive(Clone, Debug)]
 pub struct AddressInfo {
+    /// The address in the game binary
     pub uking_address: u64,
+    /// Name of the symbol
     pub name: String,
+    /// Address info
     pub info: AddrType,
 }
 
+/// Definition of the a symbol at an address
 #[derive(Clone, Debug)]
 pub struct AddressDef {
+    /// The address in the game binary
     pub uking_address: u64,
+    /// Name of the symbol
     pub name: String,
+    /// If the symbol is a function
     pub is_func: bool,
+    /// Return type or data type of the symbol
     pub ty_yaml: Option<String>,
+    /// Arguments of the symbol, if it is a function (name, type)
     pub args: Vec<(Option<String>, Option<String>)>,
+}
+
+impl AddressInfo {
+    pub fn into_def(self, types: &TypeStore, defs: &BTreeMap<String, TypeDef>) -> Result<AddressDef, Error> {
+        let mut referenced_names = Vec::new();
+        let (is_func, ty_yaml, args) = match self.info {
+            AddrType::Undecompiled => {
+                (true, None, vec![])
+            }
+            AddrType::Data(info) => {
+                match info.ty_offset {
+                    Some(ty) => {
+                        let ty = types.get_name(ty)
+                            .attach_printable_lazy(|| format!("While creating data definition for {}", self.name))?;
+                        for name in ty.referenced_names() {
+                            referenced_names.push(name);
+                        }
+                        (false, Some(ty.yaml_string()), vec![])
+                    }
+                    None => {
+                        (false, None, vec![])
+                    }
+                }
+            }
+            AddrType::Func(info) => {
+                let ty= types.get_name(info.ret_ty_offset)
+                    .attach_printable_lazy(|| format!("While creating function definition for {}", self.name))?;
+                for name in ty.referenced_names() {
+                    referenced_names.push(name);
+                }
+                let ty_yaml = ty.yaml_string();
+                let mut args = Vec::new();
+                for (name, ty) in info.args {
+                    let ty = match ty {
+                        Some(ty) => {
+                            let ty = types.get_name(ty)
+                                .attach_printable_lazy(|| format!("While creating function definition for {}", self.name))?;
+                            for name in ty.referenced_names() {
+                                referenced_names.push(name);
+                            }
+                            Some(ty.yaml_string())
+                        }
+                        None => None,
+                    };
+                    args.push((name, ty));
+                }
+                (true, Some(ty_yaml), args)
+            }
+        };
+
+        for name in referenced_names {
+            if !defs.contains_key(&name) {
+                let r = report!(Error::BrokenTypeRef(name.clone()))
+                    .attach_printable(format!("While creating definition for {}", self.name));
+                return Err(r);
+            }
+        }
+
+        Ok(AddressDef {
+            uking_address: self.uking_address,
+            name: self.name,
+            is_func,
+            ty_yaml,
+            args,
+        })
+    }
 }
 
 impl std::fmt::Display for AddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x} {} {}", self.uking_address, self.name, self.info)
+    }
+}
+
+impl TypeYaml for AddressDef {
+    fn yaml_string(&self) -> String {
+        let addr = self.uking_address & 0xFFFFFFFF;
+        let mut s = format!("  '0x{:08x}':", addr);
+        let tag = if self.is_func {
+            "func"
+        } else {
+            "data"
+        };
+        if self.ty_yaml.is_none() && self.args.is_empty() {
+            s.push_str(&format!(" {{ {tag}: '{}' }}\n", self.name));
+            return s;
+        }
+        s.push_str("\n");
+        s.push_str(&format!("    {tag}: '{}'\n", self.name));
+        if let Some(t) = &self.ty_yaml {
+            s.push_str(&format!("    type: [ {} ] \n", t));
+        }
+        if self.is_func {
+            if !self.args.is_empty() {
+                s.push_str("    args:\n");
+                for (name, ty) in &self.args {
+                    s.push_str("      - { ");
+                    if let Some(name) = name {
+                        s.push_str(&format!("name: '{}', ", name));
+                    }
+                    if let Some(ty) = ty {
+                        s.push_str(&format!("type: [ {} ]", ty));
+                    }
+                    s.push_str(" }\n");
+                }
+            }
+        }
+        s
     }
 }
 

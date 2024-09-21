@@ -97,7 +97,7 @@ impl TypeResolver {
     }
 
     pub fn merge_pass1(s: &Arc<RwLock<Self>>) {
-        Self::merge_pass_by_filter(s, 8192, 0.05, |_| true, "Deduplicate types pass 1");
+        Self::merge_pass_by_filter(s, 8192, 0.1, |_| true, "Deduplicate types pass 1");
     }
 
     pub fn merge_primitives(s: &Arc<RwLock<Self>>) {
@@ -118,7 +118,7 @@ impl TypeResolver {
             |x| {
                 let s = s.read().unwrap();
                 let ty = s.offset_to_type.get(&x).unwrap();
-                matches!(ty, TypeInfo::Struct(_))
+                matches!(ty, TypeInfo::Struct(x))
             },
             "Deduplicate structs",
         );
@@ -130,7 +130,7 @@ impl TypeResolver {
             |x| {
                 let s = s.read().unwrap();
                 let ty = s.offset_to_type.get(&x).unwrap();
-                matches!(ty, TypeInfo::Enum(_))
+                matches!(ty, TypeInfo::Enum(x))
             },
             "Deduplicate enums",
         );
@@ -142,7 +142,7 @@ impl TypeResolver {
             |x| {
                 let s = s.read().unwrap();
                 let ty = s.offset_to_type.get(&x).unwrap();
-                matches!(ty, TypeInfo::Union(_))
+                matches!(ty, TypeInfo::Union(x))
             },
             "Deduplicate unions",
         );
@@ -689,7 +689,7 @@ impl TypeResolver {
             return false;
         }
         let mut seen = HashSet::new();
-        return self.are_equiv_bucket(*a_bucket, *b_bucket, &mut seen);
+        return self.are_equiv_bucket(*a_bucket, *b_bucket, &mut seen, false);
     }
 
     fn are_equiv(
@@ -697,10 +697,11 @@ impl TypeResolver {
         a_offset: usize,
         b_offset: usize,
         seen: &mut HashSet<(usize, usize)>,
+        allow_decl: bool,
     ) -> bool {
         let a_bucket = self.offset_to_bucket.get(&a_offset).unwrap();
         let b_bucket = self.offset_to_bucket.get(&b_offset).unwrap();
-        return self.are_equiv_bucket(*a_bucket, *b_bucket, seen);
+        return self.are_equiv_bucket(*a_bucket, *b_bucket, seen, allow_decl);
     }
 
     /// Perform high-level merge checks
@@ -711,12 +712,13 @@ impl TypeResolver {
         a_bucket: usize,
         b_bucket: usize,
         seen: &mut HashSet<(usize, usize)>,
+        allow_decl: bool
     ) -> bool {
         if a_bucket == b_bucket {
             return true;
         }
         if a_bucket > b_bucket {
-            return self.are_equiv_bucket(b_bucket, a_bucket, seen);
+            return self.are_equiv_bucket(b_bucket, a_bucket, seen, allow_decl);
         }
         if !seen.insert((a_bucket, b_bucket)) {
             return false;
@@ -730,7 +732,10 @@ impl TypeResolver {
             }
             (TypeInfo::Struct(a_struct), TypeInfo::Struct(b_struct)) => {
                 if a_struct.is_decl || b_struct.is_decl {
-                    return a_struct.name == b_struct.name;
+                    // if allow_decl || (a_struct.is_decl && b_struct.is_decl) {
+                        return a_struct.name == b_struct.name;
+                    // }
+                    // return false;
                 }
                 if a_struct.size != b_struct.size {
                     return false;
@@ -762,7 +767,7 @@ impl TypeResolver {
                         }
                     }
                 }
-                if !a_struct.vtable.are_equiv(&b_struct.vtable) {
+                if !a_struct.vtable.is_equiv_to(&b_struct.vtable) {
                     return false;
                 }
                 for (a_member, b_member) in a_struct.members.iter().zip(b_struct.members.iter()) {
@@ -781,7 +786,7 @@ impl TypeResolver {
                         return false;
                     }
                     // types must be checked as well
-                    if !self.are_equiv(a_member.ty_offset, b_member.ty_offset, seen) {
+                    if !self.are_equiv(a_member.ty_offset, b_member.ty_offset, seen, false) {
                         return false;
                     }
                 }
@@ -789,7 +794,10 @@ impl TypeResolver {
             }
             (TypeInfo::Union(a_union), TypeInfo::Union(b_union)) => {
                 if a_union.is_decl || b_union.is_decl {
-                    return a_union.name == b_union.name;
+                    // if allow_decl || (a_union.is_decl && b_union.is_decl) {
+                        return a_union.name == b_union.name;
+                    // }
+                    // return false;
                 }
                 // both union name and union member names don't matter
                 if a_union.members.len() != b_union.members.len() {
@@ -814,7 +822,7 @@ impl TypeResolver {
                     if a_member.0 != b_member.0 {
                         return false;
                     }
-                    if !self.are_equiv(a_member.1, b_member.1, seen) {
+                    if !self.are_equiv(a_member.1, b_member.1, seen, false) {
                         return false;
                     }
                 }
@@ -822,7 +830,10 @@ impl TypeResolver {
             }
             (TypeInfo::Enum(a_enum), TypeInfo::Enum(b_enum)) => {
                 if a_enum.is_decl || b_enum.is_decl {
-                    return a_enum.name == b_enum.name;
+                    // if allow_decl || (a_enum.is_decl && b_enum.is_decl){
+                        return a_enum.name == b_enum.name;
+                    // }
+                    // return false;
                 }
                 // names matters if they don't have any enumerators
                 if a_enum.enumerators.len() == 0 || b_enum.enumerators.len() == 0 {
@@ -857,7 +868,7 @@ impl TypeResolver {
                 return true;
             }
             (TypeInfo::Comp(TypeComp::Ptr(a_ptr)), TypeInfo::Comp(TypeComp::Ptr(b_ptr))) => {
-                return self.are_equiv(*a_ptr, *b_ptr, seen)
+                return self.are_equiv(*a_ptr, *b_ptr, seen, true)
             }
             (
                 TypeInfo::Comp(TypeComp::Array(a_t, a_count)),
@@ -866,7 +877,7 @@ impl TypeResolver {
                 if a_count != b_count {
                     return false;
                 }
-                return self.are_equiv(*a_t, *b_t, seen);
+                return self.are_equiv(*a_t, *b_t, seen, false);
             }
             (
                 TypeInfo::Comp(TypeComp::Subroutine(a_ret, a_param)),
@@ -875,11 +886,11 @@ impl TypeResolver {
                 if a_param.len() != b_param.len() {
                     return false;
                 }
-                if !self.are_equiv(*a_ret, *b_ret, seen) {
+                if !self.are_equiv(*a_ret, *b_ret, seen, false) {
                     return false;
                 }
                 for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
-                    if !self.are_equiv(*a_p, *b_p, seen) {
+                    if !self.are_equiv(*a_p, *b_p, seen, false) {
                         return false;
                     }
                 }
@@ -893,15 +904,15 @@ impl TypeResolver {
                     return false;
                 }
                 // ptmf are similar to subroutine, with an additional this type
-                if !self.are_equiv(*a_this, *b_this, seen) {
+                if !self.are_equiv(*a_this, *b_this, seen, false) {
                     return false;
                 }
-                if !self.are_equiv(*a_ret, *b_ret, seen) {
+                if !self.are_equiv(*a_ret, *b_ret, seen, false) {
                     return false;
                 }
 
                 for (a_p, b_p) in a_param.iter().zip(b_param.iter()) {
-                    if !self.are_equiv_bucket(*a_p, *b_p, seen) {
+                    if !self.are_equiv_bucket(*a_p, *b_p, seen, false) {
                         return false;
                     }
                 }

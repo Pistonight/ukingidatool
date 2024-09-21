@@ -53,16 +53,87 @@ impl TypeStore {
 
 impl TypeStore {
     pub fn are_equal(&self, a: usize, b: usize) -> Result<bool, Error> {
-        let a = self.resolver.get_bucket(a).attach_printable_lazy(|| {
-            format!("While comparing offset: 0x{:08x} and 0x{:08x}", a, b)
-        })?;
-        let b = self.resolver.get_bucket(b).attach_printable_lazy(|| {
-            format!(
-                "While comparing offset: bucket 0x{:08x} and offset 0x{:08x}",
-                a, b
-            )
-        })?;
-        Ok(a == b)
+        let ty_a = self.resolver.get_info(a)?;
+        let ty_b = self.resolver.get_info(b)?;
+        match (ty_a.is_decl(), ty_b.is_decl()) {
+            (true, true) => {
+                // both are declarations, compare the declaration name
+                return Ok(ty_a.declaration_name() == ty_b.declaration_name())
+            }
+            (true, false) => {
+                // does b bucket have any name equals to A
+                let offsets = self.resolver.get_bucket_offsets(b)?;
+                for b in offsets {
+                    let ty_b = self.resolver.get_info(*b)?;
+                    if ty_b.declaration_name() == ty_a.declaration_name() {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false)
+            }
+            (false, true) => {
+                // does a bucket have any name equals to B
+                let offsets = self.resolver.get_bucket_offsets(a)?;
+                for a in offsets {
+                    let ty_a = self.resolver.get_info(*a)?;
+                    if ty_a.declaration_name() == ty_b.declaration_name() {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false)
+            }
+            (false, false) => { }
+        }
+        // both are definitions, compare the bucket
+        let a = self.resolver.get_bucket(a)?;
+        let b = self.resolver.get_bucket(b)?;
+        if a ==b {
+            return Ok(true);
+        }
+        // composition
+        match (ty_a, ty_b) {
+            (TypeInfo::Comp(TypeComp::Ptr(a)), TypeInfo::Comp(TypeComp::Ptr(b))) => {
+                // both are pointers, compare the target type
+                Ok(self.are_equal(*a, *b)?)
+            }
+            (TypeInfo::Comp(TypeComp::Array(a, l1)), TypeInfo::Comp(TypeComp::Array(b, l2))) => {
+                // both are arrays, compare the element type
+                Ok(l1 == l2 && self.are_equal(*a, *b)?)
+            }
+            (TypeInfo::Comp(TypeComp::Subroutine(a_ret, a_param)), TypeInfo::Comp(TypeComp::Subroutine(b_ret, b_param))) => {
+                // both are subroutines, compare the return type and parameters
+                if !self.are_equal(*a_ret, *b_ret)? {
+                    return Ok(false);
+                }
+                if a_param.len() != b_param.len() {
+                    return Ok(false);
+                }
+                for (a, b) in a_param.iter().zip(b_param.iter()) {
+                    if !self.are_equal(*a, *b)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            (TypeInfo::Comp(TypeComp::Ptmf(a_this, a_ret, a_param)), TypeInfo::Comp(TypeComp::Ptmf(b_this, b_ret, b_param))) => {
+                if !self.are_equal(*a_this, *b_this)? {
+                    return Ok(false);
+                }
+                if !self.are_equal(*a_ret, *b_ret)? {
+                    return Ok(false);
+                }
+                if a_param.len() != b_param.len() {
+                    return Ok(false);
+                }
+                for (a, b) in a_param.iter().zip(b_param.iter()) {
+                    if !self.are_equal(*a, *b)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            _ => Ok(false),
+        }
     }
 
     pub fn get_bucket(&self, offset: usize) -> Result<usize, Error> {
@@ -322,15 +393,26 @@ impl TypeStore {
         };
         let key = name.clone();
         let def = match info {
-            TypeInfo::Enum(x) => TypeDef::Enum(EnumDef {
-                name,
-                size: x.size,
-                enumerators: x.enumerators.clone(),
-            }),
+            TypeInfo::Enum(x) => {
+                if x.is_decl {
+                    return Ok(None);
+                }
+                TypeDef::Enum(EnumDef {
+                    name,
+                    size: x.size,
+                    enumerators: x.enumerators.clone(),
+                })
+            }
             TypeInfo::Struct(x) => {
+                if x.is_decl {
+                    return Ok(None);
+                }
                 TypeDef::Struct(self.create_struct_def(x, &name, name_to_def, referenced_names)?)
             }
             TypeInfo::Union(x) => {
+                if x.is_decl {
+                    return Ok(None);
+                }
                 let mut members: Vec<(String, String)> = Vec::with_capacity(x.members.len());
                 for (i, (name, offset)) in x.members.into_iter().enumerate() {
                     let mut name = name.unwrap_or_else(|| format!("_{}", i));

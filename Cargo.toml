@@ -15,5 +15,4 @@ thiserror = "1.0.63"
 [features]
 default = []
 debug-resolve-name = [] # Debug name resolution algorithm
-debug-type-gc = [] # Debug type garbage collection algorithm
 debug-layout = [] # Debug layout optimization handling (tail padding and empty base)

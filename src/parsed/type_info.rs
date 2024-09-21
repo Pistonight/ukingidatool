@@ -1,4 +1,4 @@
-use super::{TypeComp, TypePrim};
+use super::{Offset, Subroutine, TypeComp, TypePrim};
 
 /// Information of the type linked to the DWARF debug info
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,7 +6,7 @@ pub enum TypeInfo {
     /// Primitive type
     Prim(TypePrim),
     /// Typedef <other> name; Other is offset in debug info
-    Typedef(String, usize),
+    Typedef(String, Offset),
     /// Struct or Class
     Struct(StructInfo),
     /// Enum
@@ -14,14 +14,43 @@ pub enum TypeInfo {
     /// Union
     Union(UnionInfo),
     /// Compound type
-    Comp(TypeComp<usize>),
+    Comp(TypeComp<Offset>),
+}
+
+impl TypeInfo {
+    pub fn pointer(ty: Offset) -> Self {
+        Self::Comp(TypeComp::Ptr(ty))
+    }
+    pub fn subroutine(retty: Offset, params: Vec<Offset>) -> Self {
+        Self::Comp(TypeComp::subroutine(retty, params))
+    }
+    pub fn ptmf(this_ty: Offset, retty: Offset, params: Vec<Offset>) -> Self {
+        Self::Comp(TypeComp::ptmf(this_ty, retty, params))
+    }
+    pub fn is_decl(&self) -> bool {
+        match self {
+            Self::Struct(s) => s.is_decl,
+            Self::Enum(e) => e.is_decl,
+            Self::Union(u) => u.is_decl,
+            _ => false,
+        }
+    }
+
+    pub fn declaration_name(&self) -> Option<&str> {
+        match self {
+            Self::Struct(s) => s.name.as_deref(),
+            Self::Enum(e) => e.name.as_deref(),
+            Self::Union(u) => u.name.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for TypeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Prim(p) => write!(f, "{}", p),
-            Self::Typedef(name, ty) => write!(f, "typedef <0x{ty:08x}> {name}"),
+            Self::Typedef(name, ty) => write!(f, "typedef {ty} {name}"),
             Self::Struct(s) => write!(
                 f,
                 "struct {}",
@@ -67,7 +96,7 @@ pub struct MemberInfo {
     /// If the member is a base type (declared with DW_TAG_inheritance)
     pub is_base: bool,
     /// The type of the member, linked to the DWARF debug info
-    pub ty_offset: usize,
+    pub ty_offset: Offset,
 }
 
 /// Information about a vtable
@@ -93,7 +122,7 @@ impl VtableInfo {
     /// 2 entries are equivalent if:
     /// - they are both destructors, or
     /// - they have the same name
-    pub fn are_equiv(&self, other: &Self) -> bool {
+    pub fn is_equiv_to(&self, other: &Self) -> bool {
         // since vtable could be incomplete, we need to check the names
         // instead of relying on the length
         for (a, b) in self.inner.iter().zip(other.inner.iter()) {
@@ -220,10 +249,8 @@ pub struct VfptrInfo {
     pub name: String,
     /// If this entry is from a base class
     pub is_from_base: bool,
-    /// Return type of the function
-    pub retty_offset: usize,
-    /// Argument types
-    pub argty_offsets: Vec<usize>,
+    /// Function type
+    pub function: Subroutine<Offset>,
 }
 impl VfptrInfo {
     pub fn is_dtor(&self) -> bool {
@@ -254,5 +281,5 @@ pub struct UnionInfo {
     /// If the union is only declared, not defined
     pub is_decl: bool,
     /// The members of the union (name, type_offset)
-    pub members: Vec<(Option<String>, usize)>,
+    pub members: Vec<(Option<String>, Offset)>,
 }

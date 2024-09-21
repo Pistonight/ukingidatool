@@ -3,7 +3,7 @@ use error_stack::{Result, ResultExt};
 use super::{Error, NamespaceMap, TypeComp, TypePrim, TypeYaml};
 
 /// Information of resolved type name
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeName {
     /// Primitive
     Prim(TypePrim),
@@ -50,13 +50,12 @@ impl TypeName {
             }
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) | TypeComp::Array(t, _) => t.add_referenced_names(names),
-                TypeComp::Subroutine(ret_ty, param_ty) => {
-                    ret_ty.add_referenced_names(names);
-                    for t in param_ty {
+                TypeComp::Subroutine(sub) => {
+                    for t in sub.iter() {
                         t.add_referenced_names(names);
                     }
                 }
-                TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                TypeComp::Ptmf(this_ty, sub) => {
                     // ptmf also needs the _ptmf struct
                     if let Self::Name(name) = this_ty {
                         names.push(format!("{}_ptmf", name));
@@ -64,8 +63,7 @@ impl TypeName {
                         panic!("ptmf of non-name type: {:?}", this_ty);
                     }
                     this_ty.add_referenced_names(names);
-                    ret_ty.add_referenced_names(names);
-                    for t in param_ty {
+                    for t in sub.iter() {
                         t.add_referenced_names(names);
                     }
                 }
@@ -95,31 +93,6 @@ impl std::fmt::Display for TypeName {
     }
 }
 
-impl std::fmt::Display for TypeComp<TypeName> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let param_ty = match self {
-            TypeComp::Ptr(t) => return write!(f, "{}*", t),
-            TypeComp::Array(t, n) => return write!(f, "{}[{}]", t, n),
-            TypeComp::Subroutine(ret_ty, param_ty) => {
-                write!(f, "({ret_ty})(")?;
-                param_ty
-            }
-            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                write!(f, "{this_ty}::({ret_ty})(")?;
-                param_ty
-            }
-        };
-        let mut iter = param_ty.iter();
-        if let Some(t) = iter.next() {
-            write!(f, "{t}")?;
-        }
-        for t in iter {
-            write!(f, ", {t}")?;
-        }
-        write!(f, ")")
-    }
-}
-
 impl TypeName {
     /// Return if this type name is primitive, or composed of primitive types
     pub fn is_primitive(&self) -> bool {
@@ -128,14 +101,12 @@ impl TypeName {
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) => t.is_primitive(),
                 TypeComp::Array(t, _) => t.is_primitive(),
-                TypeComp::Subroutine(ret_ty, param_ty) => {
-                    ret_ty.is_primitive()
-                        && param_ty.iter().all(|t| t.is_primitive())
+                TypeComp::Subroutine(s) => {
+                    s.iter().all(|t| t.is_primitive())
                 }
-                TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                TypeComp::Ptmf(this_ty, s) => {
                     this_ty.is_primitive()
-                        && ret_ty.is_primitive()
-                        && param_ty.iter().all(|t| t.is_primitive())
+                    && s.iter().all(|t| t.is_primitive())
                 }
             },
             _ => false,
@@ -156,29 +127,45 @@ impl TypeName {
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) => t.count_anonymous(),
                 TypeComp::Array(t, _) => t.count_anonymous(),
-                TypeComp::Subroutine(ret_ty, param_ty) => {
-                    ret_ty.count_anonymous()
-                        + param_ty.iter().map(|t| t.count_anonymous()).sum::<usize>()
+                TypeComp::Subroutine(sub) => {
+                    sub.iter().map(|t| t.count_anonymous()).sum::<usize>()
                 }
-                TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                TypeComp::Ptmf(this_ty, sub) => {
                     this_ty.count_anonymous()
-                        + ret_ty.count_anonymous()
-                        + param_ty.iter().map(|t| t.count_anonymous()).sum::<usize>()
+                        + sub.iter().map(|t| t.count_anonymous()).sum::<usize>()
                 }
             },
         }
     }
+}
 
-    /// Return if this name is preferred over other name, based on some heuristics
-    pub fn is_preferred_over(&self, other: &Self) -> std::cmp::Ordering {
+impl PartialOrd for TypeName {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Ordering for TypeName, more preferred are larger
+impl Ord for TypeName {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // prefer primitive types over non-primitive types
-        if self.is_primitive() && !other.is_primitive() {
-            return std::cmp::Ordering::Greater;
+        let self_prim = self.is_primitive();
+        let other_prim = other.is_primitive();
+        match (self_prim, other_prim) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
+
         // prefer less anonymous types
-        if self.count_anonymous() < other.count_anonymous() {
-            return std::cmp::Ordering::Greater;
+        let self_anonymous = self.count_anonymous();
+        let other_anonymous = other.count_anonymous();
+        match self_anonymous.cmp(&other_anonymous) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
+            _ => (),
         }
+
         let self_name = match self {
             Self::Prim(_) => {
                 // self is primitive and other is primitive too, they are probably the same type
@@ -194,29 +181,24 @@ impl TypeName {
                     TypeComp::Ptr(t) | TypeComp::Array(t, _) => {
                         match other_c.as_ref() {
                             TypeComp::Ptr(t_c) | TypeComp::Array(t_c, _) => {
-                                return t.is_preferred_over(t_c);
+                                return t.cmp(t_c);
                             }
                             // prefer more compounded types
                             _ => return std::cmp::Ordering::Less,
                         }
                     }
-                    TypeComp::Subroutine(ret_ty, param_ty) => {
+                    TypeComp::Subroutine(sub) => {
                         match other_c.as_ref() {
                             TypeComp::Ptr(_) | TypeComp::Array(_, _) => {
                                 // prefer more compounded types
                                 return std::cmp::Ordering::Greater;
                             }
-                            TypeComp::Subroutine(ret_ty_c, param_ty_c) => {
+                            TypeComp::Subroutine(sub_c) => {
                                 let mut less_count = 0;
                                 let mut more_count = 0;
 
-                                let ty_iter = std::iter::once(ret_ty)
-                                    .chain(param_ty.iter())
-                                    .zip(std::iter::once(ret_ty_c).chain(param_ty_c.iter()));
-                                for (t, t_c) in ty_iter {
-                                    // let t_ty = name.get(t).unwrap();
-                                    // let t_c_ty = name.get(t_c).unwrap();
-                                    match t.is_preferred_over(t_c) {
+                                for (t, t_c) in sub.iter().zip(sub_c.iter()) {
+                                    match t.cmp(t_c) {
                                         std::cmp::Ordering::Less => {
                                             if more_count > 0 {
                                                 return std::cmp::Ordering::Equal;
@@ -245,22 +227,20 @@ impl TypeName {
                             _ => return std::cmp::Ordering::Less,
                         }
                     }
-                    TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+                    TypeComp::Ptmf(this_ty, sub) => {
                         match other_c.as_ref() {
-                            TypeComp::Ptmf(this_ty_c, ret_ty_c, param_ty_c) => {
+                            TypeComp::Ptmf(this_ty_c, sub_c) => {
                                 let mut less_count = 0;
                                 let mut more_count = 0;
 
                                 let ty_iter = std::iter::once(this_ty)
-                                    .chain(std::iter::once(ret_ty))
-                                    .chain(param_ty.iter())
+                                    .chain(sub.iter())
                                     .zip(
                                         std::iter::once(this_ty_c)
-                                            .chain(std::iter::once(ret_ty_c))
-                                            .chain(param_ty_c.iter()),
+                                            .chain(sub_c.iter()),
                                     );
                                 for (t, t_c) in ty_iter {
-                                    match t.is_preferred_over(t_c) {
+                                    match t.cmp(t_c) {
                                         std::cmp::Ordering::Less => {
                                             if more_count > 0 {
                                                 return std::cmp::Ordering::Equal;
@@ -293,7 +273,6 @@ impl TypeName {
             }
             Self::Name(x) => x,
         };
-
         let other_name = match other {
             Self::Prim(_) => {
                 // prefer primitive over named
@@ -305,14 +284,14 @@ impl TypeName {
             }
             Self::Name(x) => x,
         };
+
         // prefer less whitespace
         let self_spaces = self_name.chars().filter(|c| c.is_whitespace()).count();
         let other_spaces = other_name.chars().filter(|c| c.is_whitespace()).count();
-        if self_spaces < other_spaces {
-            return std::cmp::Ordering::Greater;
-        }
-        if self_spaces > other_spaces {
-            return std::cmp::Ordering::Less;
+        match self_spaces.cmp(&other_spaces) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
+            _ => (),
         }
 
         // prefer less < >
@@ -321,67 +300,64 @@ impl TypeName {
             .chars()
             .filter(|c| *c == '<' || *c == '>')
             .count();
-        if self_angle < other_angle {
-            return std::cmp::Ordering::Greater;
-        }
-        if self_angle > other_angle {
-            return std::cmp::Ordering::Less;
+        match self_angle.cmp(&other_angle) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
+            _ => (),
         }
 
         // prefer ksys
         let self_ksys = self_name.starts_with("ksys");
         let other_ksys = other_name.starts_with("ksys");
-        if self_ksys && !other_ksys {
-            return std::cmp::Ordering::Greater;
-        }
-        if !self_ksys && other_ksys {
-            return std::cmp::Ordering::Less;
+        match (self_ksys, other_ksys) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
 
         // prefer uking
-        let self_ksys = self_name.starts_with("uking");
-        let other_ksys = other_name.starts_with("uking");
-        if self_ksys && !other_ksys {
-            return std::cmp::Ordering::Greater;
-        }
-        if !self_ksys && other_ksys {
-            return std::cmp::Ordering::Less;
+        let self_uking = self_name.starts_with("uking");
+        let other_uking = other_name.starts_with("uking");
+        match (self_uking, other_uking) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
 
         // prefer sead
         let self_sead = self_name.starts_with("sead");
         let other_sead = other_name.starts_with("sead");
-        if self_sead && !other_sead {
-            return std::cmp::Ordering::Greater;
-        }
-        if !self_sead && other_sead {
-            return std::cmp::Ordering::Less;
+        match (self_sead, other_sead) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
 
         // prefer nn
         let self_nn = self_name.starts_with("nn");
         let other_nn = other_name.starts_with("nn");
-        if self_nn && !other_nn {
-            return std::cmp::Ordering::Greater;
+        match (self_nn, other_nn) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
-        if !self_nn && other_nn {
-            return std::cmp::Ordering::Less;
-        }
-
 
         // prefer fewer underscores
         let self_underscores = self_name.chars().filter(|c| *c == '_').count();
         let other_underscores = other_name.chars().filter(|c| *c == '_').count();
-        if self_underscores < other_underscores {
-            return std::cmp::Ordering::Greater;
-        }
-        if self_underscores > other_underscores {
-            return std::cmp::Ordering::Less;
+        match self_underscores.cmp(&other_underscores) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
+            _ => (),
         }
 
         // prefer std
-        if self_name.starts_with("std::") && !other_name.starts_with("std::") {
-            return std::cmp::Ordering::Greater;
+        let self_std = self_name.starts_with("std");
+        let other_std = other_name.starts_with("std");
+        match (self_std, other_std) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
         }
 
         // prefer shorter

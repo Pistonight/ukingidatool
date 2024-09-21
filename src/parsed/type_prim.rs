@@ -94,40 +94,68 @@ impl std::fmt::Display for TypePrim {
 }
 
 /// Composite or compound types
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeComp<T> {
     /// T* or T&
     Ptr(T),
     /// T[elem_count]
     Array(T, usize),
     /// Function type with (ret_ty, param_ty)
-    Subroutine(T, Vec<T>),
+    Subroutine(Subroutine<T>),
     /// Ptr-to-member-function (this_ty, ret_ty, param_ty)
-    Ptmf(T, T, Vec<T>),
+    Ptmf(T, Subroutine<T>),
 }
 
-impl std::fmt::Display for TypeComp<usize> {
+impl<T> TypeComp<T> {
+    pub fn subroutine(retty: T, params: Vec<T>) -> Self {
+        Self::Subroutine(Subroutine { retty, params })
+    }
+
+    pub fn ptmf(this_ty: T, retty: T, params: Vec<T>) -> Self {
+        Self::Ptmf(this_ty, Subroutine { retty, params })
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for TypeComp<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let param_ty = match self {
-            TypeComp::Ptr(t) => return write!(f, "<0x{t:08x}>*"),
-            TypeComp::Array(t, n) => return write!(f, "<0x{t:08x}>[{n}]"),
-            TypeComp::Subroutine(ret_ty, param_ty) => {
-                write!(f, "(<0x{ret_ty:08x}>)(")?;
-                param_ty
+            TypeComp::Ptr(t) => return write!(f, "{t}*"),
+            TypeComp::Array(t, n) => return write!(f, "{t}[{n}]"),
+            TypeComp::Subroutine(Subroutine { retty, params }) => {
+                write!(f, "({retty})(")?;
+                params
             }
-            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
-                write!(f, "<0x{this_ty:08x}>::(<0x{ret_ty:08x}>)(")?;
-                param_ty
+            TypeComp::Ptmf(this_ty, Subroutine { retty, params }) => {
+                write!(f, "({this_ty}::{retty})(")?;
+                params
             }
         };
         let mut iter = param_ty.iter();
         if let Some(t) = iter.next() {
-            write!(f, "<0x{t:08x}>")?;
+            write!(f, "{t}")?;
         }
         for t in iter {
-            write!(f, ", <0x{t:08x}>")?;
+            write!(f, ", {t}")?;
         }
         write!(f, ")")
+    }
+}
+
+/// Subroutine type
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Subroutine<T> {
+    /// Return type
+    pub retty: T,
+    /// Parameters
+    pub params: Vec<T>,
+}
+impl<T> Subroutine<T> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(&self.retty).chain(self.params.iter())
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = T> {
+        std::iter::once(self.retty).chain(self.params.into_iter())
     }
 }
 
@@ -164,17 +192,17 @@ impl<T: TypeYaml> TypeYaml for TypeComp<T> {
         let (mut s, param_ty) = match self {
             TypeComp::Ptr(t) => return format!("{},'*'", t.yaml_string()),
             TypeComp::Array(t, n) => return format!("{},[{}]", t.yaml_string(), n),
-            TypeComp::Subroutine(ret_ty, param_ty) => {
-                let s = format!("{},'()', [", ret_ty.yaml_string());
-                (s, param_ty)
+            TypeComp::Subroutine(Subroutine { retty, params }) => {
+                let s = format!("{},'()', [", retty.yaml_string());
+                (s, params)
             }
-            TypeComp::Ptmf(this_ty, ret_ty, param_ty) => {
+            TypeComp::Ptmf(this_ty, Subroutine { retty, params }) => {
                 let s = format!(
                     "{},'(ptmf)', [{}], [",
-                    ret_ty.yaml_string(),
+                    retty.yaml_string(),
                     this_ty.yaml_string()
                 );
-                (s, param_ty)
+                (s, params)
             }
         };
 
@@ -189,3 +217,31 @@ impl<T: TypeYaml> TypeYaml for TypeComp<T> {
         s
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct Offset(usize);
+
+impl std::fmt::Display for Offset {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "<0x{:08x}>", self.0)
+    }
+}
+
+impl std::fmt::Debug for Offset {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Offset(0x{:08x})", self.0)
+    }
+}
+
+impl From<usize> for Offset {
+    fn from(offset: usize) -> Self {
+        Self(offset)
+    }
+}
+
+impl Into<usize> for Offset {
+    fn into(self) -> usize {
+        self.0
+    }
+}
+

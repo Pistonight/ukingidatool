@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use error_stack::{Result, ResultExt};
 
-use super::Error;
+use super::TypeError;
 
 /// Namespace info
 #[derive(Debug, Default, Clone)]
@@ -46,11 +46,11 @@ impl<'a> AsRef<BTreeMap<usize, Namespace<'a>>> for NamespaceMap<'a> {
 
 impl<'a> NamespaceMap<'a> {
     /// Get the name prefixed by the namespace at the given offset
-    pub fn get(&self, offset: usize, name: &str) -> Result<String, Error> {
+    pub fn get(&self, offset: usize, name: &str) -> Result<String, TypeError> {
         let ns = self
             .map
             .get(&offset)
-            .ok_or(Error::UnlinkedNamespace(offset))
+            .ok_or(TypeError::UnlinkedNamespace(offset))
             .attach_printable_lazy(|| format!("While getting for name: {}", name))?;
         Ok(ns.get_with(name))
     }

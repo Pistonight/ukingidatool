@@ -154,6 +154,7 @@ impl<T> Subroutine<T> {
         std::iter::once(&self.retty).chain(self.params.iter())
     }
 
+    #[allow(dead_code)]
     pub fn into_iter(self) -> impl Iterator<Item = T> {
         std::iter::once(self.retty).chain(self.params.into_iter())
     }
@@ -244,4 +245,3 @@ impl Into<usize> for Offset {
         self.0
     }
 }
-

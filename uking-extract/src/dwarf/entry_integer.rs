@@ -1,6 +1,6 @@
 use gimli::{
-    AttributeValue, DW_AT_byte_size, DW_AT_const_value, DW_AT_count, DW_AT_data_member_location,
-    DwAt, Operation,
+    AttributeValue, DW_AT_bit_size, DW_AT_byte_size, DW_AT_const_value, DW_AT_count,
+    DW_AT_data_member_location, DwAt, Operation,
 };
 
 use error_stack::{Result, ResultExt};
@@ -38,6 +38,13 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
             .get_entry_unsigned_attr(entry, DW_AT_data_member_location)?
             .try_into()
             .unwrap())
+    }
+
+    /// Get the DW_AT_bit_size of a DIE
+    pub fn get_entry_bit_size(&self, entry: &DIE<'i, '_, '_>) -> Result<Option<usize>, Error> {
+        Ok(self
+            .get_entry_unsigned_attr_optional(entry, DW_AT_bit_size)?
+            .map(|x| x.try_into().unwrap()))
     }
 
     /// Get the DW_AT_const_value of a DIE

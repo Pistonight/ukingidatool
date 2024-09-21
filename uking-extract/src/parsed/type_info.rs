@@ -24,6 +24,7 @@ impl TypeInfo {
     pub fn subroutine(retty: Offset, params: Vec<Offset>) -> Self {
         Self::Comp(TypeComp::subroutine(retty, params))
     }
+    #[allow(dead_code)]
     pub fn ptmf(this_ty: Offset, retty: Offset, params: Vec<Offset>) -> Self {
         Self::Comp(TypeComp::ptmf(this_ty, retty, params))
     }
@@ -33,15 +34,6 @@ impl TypeInfo {
             Self::Enum(e) => e.is_decl,
             Self::Union(u) => u.is_decl,
             _ => false,
-        }
-    }
-
-    pub fn declaration_name(&self) -> Option<&str> {
-        match self {
-            Self::Struct(s) => s.name.as_deref(),
-            Self::Enum(e) => e.name.as_deref(),
-            Self::Union(u) => u.name.as_deref(),
-            _ => None,
         }
     }
 }
@@ -97,6 +89,17 @@ pub struct MemberInfo {
     pub is_base: bool,
     /// The type of the member, linked to the DWARF debug info
     pub ty_offset: Offset,
+
+    pub is_bitfield: bool,
+    pub byte_size: usize,
+}
+
+impl MemberInfo {
+    pub fn make_bitfield(&mut self, size: usize) {
+        self.is_bitfield = true;
+        self.byte_size = size;
+        self.name = Some(format!("bitfield_{:x}", self.offset));
+    }
 }
 
 /// Information about a vtable

@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use error_stack::{report, Result, ResultExt};
 
-use super::{Error, Offset, TypeDef, TypeGc, TypeMerger, TypeYaml};
+use crate::parsed::TypeError;
+
+use super::{Offset, TypeDef, TypeYaml, TypesStage1, TypesStage2, TypesStage6};
 
 /// Information about symbol at an address, linked to type offsets in DWARF
 #[derive(Clone, Debug)]
@@ -30,71 +32,66 @@ pub struct AddressDef {
     pub args: Vec<(Option<String>, Option<String>)>,
 }
 
-// impl AddressInfo {
-//     pub fn into_def(self, types: &TypeStore, defs: &BTreeMap<String, TypeDef>) -> Result<AddressDef, Error> {
-//         let mut referenced_names = Vec::new();
-//         let (is_func, ty_yaml, args) = match self.info {
-//             AddrType::Undecompiled => {
-//                 (true, None, vec![])
-//             }
-//             AddrType::Data(info) => {
-//                 match info.ty_offset {
-//                     Some(ty) => {
-//                         let ty = types.get_name(ty)
-//                             .attach_printable_lazy(|| format!("While creating data definition for {}", self.name))?;
-//                         for name in ty.referenced_names() {
-//                             referenced_names.push(name);
-//                         }
-//                         (false, Some(ty.yaml_string()), vec![])
-//                     }
-//                     None => {
-//                         (false, None, vec![])
-//                     }
-//                 }
-//             }
-//             AddrType::Func(info) => {
-//                 let ty= types.get_name(info.ret_ty_offset)
-//                     .attach_printable_lazy(|| format!("While creating function definition for {}", self.name))?;
-//                 for name in ty.referenced_names() {
-//                     referenced_names.push(name);
-//                 }
-//                 let ty_yaml = ty.yaml_string();
-//                 let mut args = Vec::new();
-//                 for (name, ty) in info.args {
-//                     let ty = match ty {
-//                         Some(ty) => {
-//                             let ty = types.get_name(ty)
-//                                 .attach_printable_lazy(|| format!("While creating function definition for {}", self.name))?;
-//                             for name in ty.referenced_names() {
-//                                 referenced_names.push(name);
-//                             }
-//                             Some(ty.yaml_string())
-//                         }
-//                         None => None,
-//                     };
-//                     args.push((name, ty));
-//                 }
-//                 (true, Some(ty_yaml), args)
-//             }
-//         };
-//
-//         for name in referenced_names {
-//             if !defs.contains_key(&name) {
-//                 let r = report!(Error::BrokenTypeRef(name.clone()))
-//                     .attach_printable(format!("While creating definition for {}", self.name));
-//                 return Err(r);
-//             }
-//         }
-//
-//         Ok(AddressDef {
-//             uking_address: self.uking_address,
-//             name: self.name,
-//             is_func,
-//             ty_yaml,
-//             args,
-//         })
-//     }
-// }
+impl AddressInfo {
+    pub fn into_def(
+        self,
+        types: &TypesStage6,
+        defs: &BTreeMap<String, TypeDef>,
+    ) -> Result<AddressDef, TypeError> {
+        let mut referenced_names = Vec::new();
+        let (is_func, ty_yaml, args) = match self.info {
+            AddrType::Undecompiled => (true, None, vec![]),
+            AddrType::Data(info) => match info.ty_offset {
+                Some(ty) => {
+                    let ty = types.get_name(&ty);
+                    for name in ty.referenced_names() {
+                        referenced_names.push(name);
+                    }
+                    (false, Some(ty.yaml_string()), vec![])
+                }
+                None => (false, None, vec![]),
+            },
+            AddrType::Func(info) => {
+                let ty = types.get_name(&info.ret_ty_offset);
+                for name in ty.referenced_names() {
+                    referenced_names.push(name);
+                }
+                let ty_yaml = ty.yaml_string();
+                let mut args = Vec::new();
+                for (name, ty) in info.args {
+                    let ty = match ty {
+                        Some(ty) => {
+                            let ty = types.get_name(&ty);
+                            for name in ty.referenced_names() {
+                                referenced_names.push(name);
+                            }
+                            Some(ty.yaml_string())
+                        }
+                        None => None,
+                    };
+                    args.push((name, ty));
+                }
+                (true, Some(ty_yaml), args)
+            }
+        };
+
+        for name in referenced_names {
+            if !defs.contains_key(&name) {
+                let r = report!(TypeError::BrokenTypeRef(name.clone()))
+                    .attach_printable(format!("While creating definition for {}", self.name));
+                return Err(r);
+            }
+        }
+
+        Ok(AddressDef {
+            uking_address: self.uking_address,
+            name: self.name,
+            is_func,
+            ty_yaml,
+            args,
+        })
+    }
+}
 
 impl std::fmt::Display for AddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -106,11 +103,7 @@ impl TypeYaml for AddressDef {
     fn yaml_string(&self) -> String {
         let addr = self.uking_address & 0xFFFFFFFF;
         let mut s = format!("  '0x{:08x}':", addr);
-        let tag = if self.is_func {
-            "func"
-        } else {
-            "data"
-        };
+        let tag = if self.is_func { "func" } else { "data" };
         if self.ty_yaml.is_none() && self.args.is_empty() {
             s.push_str(&format!(" {{ {tag}: '{}' }}\n", self.name));
             return s;
@@ -218,15 +211,13 @@ pub enum AddressInfoMismatch {
     ParamNameMismatch(usize),
     #[error("Data type mismatch")]
     DataTypeMismatch,
-    #[error("Type error")]
-    Type,
 }
 
 impl AddressInfo {
     pub fn check_and_merge(
         &mut self,
         other: AddressInfo,
-        types: &mut TypeMerger,
+        types: &mut TypesStage1,
     ) -> Result<(), AddressInfoMismatch> {
         // other wouldn't have address so we don't check
         if self.name != other.name {
@@ -244,7 +235,7 @@ impl AddressInfo {
         }
     }
 
-    pub fn mark_types(&self, types: &mut TypeGc) {
+    pub fn mark_types(&self, types: &mut TypesStage2) {
         match &self.info {
             AddrType::Func(info) => info.mark_types(types),
             AddrType::Data(info) => info.mark_types(types),
@@ -258,7 +249,7 @@ impl FuncInfo {
     pub fn check_and_merge(
         &mut self,
         other: &FuncInfo,
-        types: &mut TypeMerger,
+        types: &mut TypesStage1,
     ) -> Result<(), AddressInfoMismatch> {
         if self.args.len() != other.args.len() {
             return Err(report!(AddressInfoMismatch::ParamCountMismatch)).attach_printable(
@@ -267,30 +258,7 @@ impl FuncInfo {
         }
         types
             .check_and_merge(&self.ret_ty_offset, &other.ret_ty_offset)
-            .change_context(AddressInfoMismatch::Type)?;
-        // {
-            // let a_bucket = types
-            //     .get_bucket(&self.ret_ty_offset)
-            //     .map(|s| format!("0x{s:08x}"))
-            //     .unwrap_or_else(|_| "<unknown>".to_string());
-            // let b_bucket = types
-            //     .get_bucket(&other.ret_ty_offset)
-            //     .map(|s| format!("0x{s:08x}"))
-            //     .unwrap_or_else(|_| "<unknown>".to_string());
-            // let a = types
-            //     .get_name(self.ret_ty_offset)
-            //     .map(|s| s.to_string())
-            //     .unwrap_or_else(|_| "<unknown>".to_string());
-            // let b = types
-            //     .get_name(other.ret_ty_offset)
-            //     .map(|s| s.to_string())
-            //     .unwrap_or_else(|_| "<unknown>".to_string());
-            // return Err(report!(AddressInfoMismatch::RetTypeMismatch))
-            //     // .attach_printable(format!("self: {a} != other: {b}"))
-            //     .attach_printable(format!(
-            //         "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
-            //     ));
-        // }
+            .change_context(AddressInfoMismatch::RetTypeMismatch)?;
         for (i, (a, b)) in self.args.iter_mut().zip(&other.args).enumerate() {
             match (&mut a.0, &b.0) {
                 (Some(a), Some(b)) => {
@@ -309,29 +277,6 @@ impl FuncInfo {
                     types
                         .check_and_merge(a, b)
                         .change_context(AddressInfoMismatch::ParamTypeMismatch(i))?;
-                    // {
-                    //     let a_bucket = types
-                    //         .get_bucket(a)
-                    //         .map(|s| format!("0x{s:08x}"))
-                    //         .unwrap_or_else(|_| "<unknown>".to_string());
-                    //     let b_bucket = types
-                    //         .get_bucket(b)
-                    //         .map(|s| format!("0x{s:08x}"))
-                    //         .unwrap_or_else(|_| "<unknown>".to_string());
-                    //     // let a = types
-                    //     //     .get_name(*a)
-                    //     //     .map(|s| s.to_string())
-                    //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                    //     // let b = types
-                    //     //     .get_name(*b)
-                    //     //     .map(|s| s.to_string())
-                    //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                    //     return Err(report!(AddressInfoMismatch::ParamTypeMismatch(i)))
-                    //         // .attach_printable(format!("self: {a} != other: {b}"))
-                    //         .attach_printable(format!(
-                    //             "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
-                    //         ));
-                    // }
                 }
                 (None, Some(b)) => {
                     a.1.replace(*b);
@@ -342,7 +287,7 @@ impl FuncInfo {
         Ok(())
     }
 
-    pub fn mark_types(&self, types: &mut TypeGc) {
+    pub fn mark_types(&self, types: &mut TypesStage2) {
         types.mark(&self.ret_ty_offset);
         for (_, ty) in &self.args {
             if let Some(ty) = ty {
@@ -356,36 +301,13 @@ impl DataInfo {
     pub fn check_and_merge(
         &mut self,
         other: &DataInfo,
-        types: &mut TypeMerger,
+        types: &mut TypesStage1,
     ) -> Result<(), AddressInfoMismatch> {
         match (&mut self.ty_offset, other.ty_offset) {
             (Some(a), Some(b)) => {
                 types
                     .check_and_merge(a, &b)
                     .change_context(AddressInfoMismatch::DataTypeMismatch)?;
-                // {
-                //     // let a_bucket = types
-                //     //     .get_bucket(a)
-                //     //     .map(|s| format!("0x{s:08x}"))
-                //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                //     // let b_bucket = types
-                //     //     .get_bucket(&b)
-                //     //     .map(|s| format!("0x{s:08x}"))
-                //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                //     // let a = types
-                //     //     .get_name(*a)
-                //     //     .map(|s| s.to_string())
-                //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                //     // let b = types
-                //     //     .get_name(b)
-                //     //     .map(|s| s.to_string())
-                //     //     .unwrap_or_else(|_| "<unknown>".to_string());
-                //     return Err(report!(AddressInfoMismatch::DataTypeMismatch))
-                //         // .attach_printable(format!("self: {a} != other: {b}"))
-                //         .attach_printable(format!(
-                //             "self_bucket: {a_bucket} != other_bucket: {b_bucket}"
-                //         ));
-                // }
             }
             (None, Some(b)) => {
                 self.ty_offset.replace(b);
@@ -395,7 +317,7 @@ impl DataInfo {
         Ok(())
     }
 
-    pub fn mark_types(&self, types: &mut TypeGc) {
+    pub fn mark_types(&self, types: &mut TypesStage2) {
         if let Some(ty) = self.ty_offset {
             types.mark(&ty);
         }

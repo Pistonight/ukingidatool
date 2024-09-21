@@ -13,7 +13,7 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
             None => Ok(usize::MAX),
         }
     }
-    
+
     /// Get the DW_AT_type of a DIE
     pub fn get_entry_type_offset(&self, entry: &DIE<'i, '_, '_>) -> Result<UnitOffset, Error> {
         let offset = self.to_global_offset(entry.offset());

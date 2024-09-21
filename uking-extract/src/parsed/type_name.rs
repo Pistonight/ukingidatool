@@ -1,6 +1,6 @@
 use error_stack::{Result, ResultExt};
 
-use super::{Error, NamespaceMap, TypeComp, TypePrim, TypeYaml};
+use super::{NamespaceMap, TypeComp, TypeError, TypePrim, TypeYaml};
 
 /// Information of resolved type name
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -14,17 +14,26 @@ pub enum TypeName {
 }
 
 impl TypeName {
-    pub fn anonymous_struct(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+    pub fn anonymous_struct(
+        offset: usize,
+        ns: &NamespaceMap,
+        hash: u64,
+    ) -> Result<Self, TypeError> {
         Self::anonymous(offset, ns, "struct", hash)
     }
-    pub fn anonymous_enum(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+    pub fn anonymous_enum(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, TypeError> {
         Self::anonymous(offset, ns, "enum", hash)
     }
-    pub fn anonymous_union(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, Error> {
+    pub fn anonymous_union(offset: usize, ns: &NamespaceMap, hash: u64) -> Result<Self, TypeError> {
         Self::anonymous(offset, ns, "union", hash)
     }
     /// Create an anonymous type name
-    fn anonymous(offset: usize, ns: &NamespaceMap, tag: &str, hash: u64) -> Result<Self, Error> {
+    fn anonymous(
+        offset: usize,
+        ns: &NamespaceMap,
+        tag: &str,
+        hash: u64,
+    ) -> Result<Self, TypeError> {
         let name = ns
             .get(offset, &format!("anonymous_{}x{:016x}", tag, hash))
             .attach_printable_lazy(|| format!("While creating anonymous {}", tag))?;
@@ -70,7 +79,6 @@ impl TypeName {
             },
         }
     }
-
 }
 
 impl TypeYaml for TypeName {
@@ -101,12 +109,9 @@ impl TypeName {
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) => t.is_primitive(),
                 TypeComp::Array(t, _) => t.is_primitive(),
-                TypeComp::Subroutine(s) => {
-                    s.iter().all(|t| t.is_primitive())
-                }
+                TypeComp::Subroutine(s) => s.iter().all(|t| t.is_primitive()),
                 TypeComp::Ptmf(this_ty, s) => {
-                    this_ty.is_primitive()
-                    && s.iter().all(|t| t.is_primitive())
+                    this_ty.is_primitive() && s.iter().all(|t| t.is_primitive())
                 }
             },
             _ => false,
@@ -127,9 +132,7 @@ impl TypeName {
             Self::Comp(c) => match c.as_ref() {
                 TypeComp::Ptr(t) => t.count_anonymous(),
                 TypeComp::Array(t, _) => t.count_anonymous(),
-                TypeComp::Subroutine(sub) => {
-                    sub.iter().map(|t| t.count_anonymous()).sum::<usize>()
-                }
+                TypeComp::Subroutine(sub) => sub.iter().map(|t| t.count_anonymous()).sum::<usize>(),
                 TypeComp::Ptmf(this_ty, sub) => {
                     this_ty.count_anonymous()
                         + sub.iter().map(|t| t.count_anonymous()).sum::<usize>()
@@ -235,10 +238,7 @@ impl Ord for TypeName {
 
                                 let ty_iter = std::iter::once(this_ty)
                                     .chain(sub.iter())
-                                    .zip(
-                                        std::iter::once(this_ty_c)
-                                            .chain(sub_c.iter()),
-                                    );
+                                    .zip(std::iter::once(this_ty_c).chain(sub_c.iter()));
                                 for (t, t_c) in ty_iter {
                                     match t.cmp(t_c) {
                                         std::cmp::Ordering::Less => {
@@ -361,6 +361,13 @@ impl Ord for TypeName {
         }
 
         // prefer shorter
-        other_name.len().cmp(&self_name.len())
+        match other_name.len().cmp(&self_name.len()) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
+            _ => (),
+        }
+
+        // for consistent ordering
+        self_name.cmp(other_name)
     }
 }

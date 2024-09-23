@@ -355,7 +355,7 @@ impl TypesStage6 {
 
         // MEMBERS ====
         let mut members: Vec<MemberDef> = Vec::new();
-        for (m, m_size) in info.members.into_iter().zip(member_sizes.into_iter()) {
+        for (mut m, m_size) in info.members.into_iter().zip(member_sizes.into_iter()) {
             let mut m_name = m.name.unwrap_or_else(|| format!("field_{:x}", m.offset));
             // replace vfptr with IDA standard
             let is_vfptr = if m_name.starts_with("_vptr$") {
@@ -454,7 +454,6 @@ impl TypesStage6 {
                 let ty_name = self.bkt2name.get(bkt).unwrap();
                 let mut ty_yaml = ty_name.yaml_string();
                 let mut inlined = false;
-                // can only inline base if we don't have a vtable
                 if (info.vtable.is_empty() || !m.is_base)
                     && member_bucket.type_ == BucketType::Struct
                 {
@@ -465,6 +464,13 @@ impl TypesStage6 {
                         if def.vtable.is_empty() && def.members.len() == 1 {
                             ty_yaml = def.members[0].ty_yaml.clone();
                             inlined = true;
+                            // if inlined, the type could be a non-struct, in which case IDA will break
+                            // if it's set as base
+                            if m.is_base {
+                                m.is_base = false;
+                                // we will take the member's name as well to be more descriptive
+                                m_name = def.members[0].name.clone();
+                            }
                         }
                     }
                 }

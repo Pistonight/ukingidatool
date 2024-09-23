@@ -112,7 +112,7 @@ First, make sure you backed up the database.
 
 Then, run the generated script in IDA with File > Script File... and select the generated script.
 
-After running the script, try saving and reopen the database to make sure it's not corrupted.
+After running the script, wait for the auto analysis to finish (should say `AU: idle` in the bottom-left), then try saving and reopen the database to make sure it's not corrupted.
 I recommend still keeping the backup around just in case.
 
 

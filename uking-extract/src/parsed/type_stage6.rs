@@ -454,11 +454,15 @@ impl TypesStage6 {
                 let ty_name = self.bkt2name.get(bkt).unwrap();
                 let mut ty_yaml = ty_name.yaml_string();
                 let mut inlined = false;
-                if member_bucket.type_ == BucketType::Struct {
+                // can only inline base if we don't have a vtable
+                if (info.vtable.is_empty() || !m.is_base)
+                    && member_bucket.type_ == BucketType::Struct
+                {
                     if let Some(TypeDef::Struct(def)) =
                         self.create_def_for_bucket(bkt, name2def, referenced_names)?
                     {
-                        if def.members.len() == 1 {
+                        // need to make sure if base type only contains vtable, it's not inlined
+                        if def.vtable.is_empty() && def.members.len() == 1 {
                             ty_yaml = def.members[0].ty_yaml.clone();
                             inlined = true;
                         }

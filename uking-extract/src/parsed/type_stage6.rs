@@ -412,9 +412,7 @@ impl TypesStage6 {
                         let m = MemberDef {
                             offset: m.offset + base_member.offset,
                             name: base_m_name,
-                            // we don't want to set baseclass flag in IDA
-                            // so making this false
-                            is_base: false,
+                            is_base: base_member.is_base,
                             ty_yaml: base_member.ty_yaml.clone(),
                         };
                         members.push(m);

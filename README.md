@@ -87,11 +87,11 @@ See `ukingidatool import --help` for all options. Some examples:
   ```bash
   ukingidatool import --address 0x00
   ```
-- Import only types and functions containing a substring
+- Import only types and functions containing a substring. Note that mangled names are used for decompiled functions.
+  Dependent types are still imported recursively
   ```bash
   ukingidatool import --pattern "PauseMenuDataMgr"
   ```
-  Dependent types are still imported recursively
 - Only import types, don't rename functions or their arguments
   ```bash
   ukingidatool import --type-only
@@ -106,7 +106,7 @@ See `ukingidatool import --help` for all options. Some examples:
   ukingidatool import --skip-types
   ```
 
-### Running the Import Script
+## Running the Import Script
 
 First, make sure you backed up the database.
 

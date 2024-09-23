@@ -1,0 +1,27 @@
+version: '3'
+
+tasks:
+  extract:
+    desc: Run uking-extract on test file
+    dir: .
+    cmds:
+    - cargo run --release --bin uking-extract {{.CLI_ARGS}}
+
+  import:
+    desc: Run uking-import on test file
+    dir: ./botw-decomp
+    cmds:
+    - cargo run --release --bin ukingidatool -- import {{.CLI_ARGS}}
+
+  check:
+    vars:
+      CLIPPY_FLAGS: -D warnings -D clippy::todo -A clippy::comparison-chain -A clippy::collapsible-if -A clippy::collapsible-else-if
+    cmds:
+    - cargo clippy --package common --all-targets -- {{.CLIPPY_FLAGS}}
+    - cargo clippy --package uking-extract --all-targets -- {{.CLIPPY_FLAGS}}
+    - cargo clippy --package ukingidatool --all-targets -- {{.CLIPPY_FLAGS}}
+    - cargo fmt --check
+
+  fix:
+    cmds:
+    - cargo fmt --all

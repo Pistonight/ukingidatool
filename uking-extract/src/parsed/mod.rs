@@ -13,6 +13,8 @@ pub use type_prim::*;
 
 mod type_error;
 pub use type_error::*;
+mod type_stage0;
+pub use type_stage0::*;
 mod type_stage1;
 pub use type_stage1::*;
 mod type_stage2;
@@ -27,3 +29,6 @@ mod type_stage6;
 pub use type_stage6::*;
 mod bucket;
 pub use bucket::*;
+
+#[cfg(feature = "debug-merge")]
+pub const DEBUG_MERGE_OFFSET: Offset = Offset::new_const(0x04e157ab);

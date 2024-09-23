@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::{Offset, Subroutine, TypeComp, TypePrim};
 
 /// Information of the type linked to the DWARF debug info
@@ -36,6 +38,23 @@ impl TypeInfo {
             _ => false,
         }
     }
+
+    pub fn slow_size(&self, off2info: &BTreeMap<Offset, Self>) -> Option<usize> {
+        match self {
+            Self::Prim(p) => p.size(),
+            Self::Typedef(_, ty) => off2info.get(ty).unwrap().slow_size(off2info),
+            Self::Struct(s) => Some(s.size),
+            Self::Enum(e) => Some(e.size),
+            Self::Union(u) => Some(u.size),
+            Self::Comp(TypeComp::Ptr(_)) => Some(8),
+            Self::Comp(TypeComp::Array(ty, len)) => {
+                let ty_size = off2info.get(ty).unwrap().slow_size(off2info)?;
+                Some(ty_size * len)
+            }
+            Self::Comp(TypeComp::Subroutine(_)) => None,
+            Self::Comp(TypeComp::Ptmf(_, _)) => Some(16),
+        }
+    }
 }
 
 impl std::fmt::Display for TypeInfo {
@@ -43,21 +62,9 @@ impl std::fmt::Display for TypeInfo {
         match self {
             Self::Prim(p) => write!(f, "{}", p),
             Self::Typedef(name, ty) => write!(f, "typedef {ty} {name}"),
-            Self::Struct(s) => write!(
-                f,
-                "struct {}",
-                s.name.as_ref().map(|x| x.as_str()).unwrap_or("<unnamed>")
-            ),
-            Self::Enum(e) => write!(
-                f,
-                "enum {}",
-                e.name.as_ref().map(|x| x.as_str()).unwrap_or("<unnamed>")
-            ),
-            Self::Union(u) => write!(
-                f,
-                "union {}",
-                u.name.as_ref().map(|x| x.as_str()).unwrap_or("<unnamed>")
-            ),
+            Self::Struct(s) => write!(f, "struct {}", s.name.as_deref().unwrap_or("<unnamed>")),
+            Self::Enum(e) => write!(f, "enum {}", e.name.as_deref().unwrap_or("<unnamed>")),
+            Self::Union(u) => write!(f, "union {}", u.name.as_deref().unwrap_or("<unnamed>")),
             Self::Comp(c) => write!(f, "{}", c),
         }
     }
@@ -285,4 +292,15 @@ pub struct UnionInfo {
     pub is_decl: bool,
     /// The members of the union (name, type_offset)
     pub members: Vec<(Option<String>, Offset)>,
+}
+
+impl UnionInfo {
+    pub fn decl(name: Option<String>, size: usize) -> Self {
+        Self {
+            name,
+            size,
+            is_decl: true,
+            members: Vec::new(),
+        }
+    }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "ukingidatool"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+common = { path = "../common", version = "=0.0.0" }
+uking-extract = { path = "../uking-extract", version = "=0.0.0" }
+clap = { version = "=4.5.13", features = ["derive"] }
+serde = { version = "1.0.210", features = ["derive"] }
+serde_yaml = "0.9.34"
+serde_json = "1.0.128"
+thiserror = "1.0.63"
+error-stack = "0.5.0"

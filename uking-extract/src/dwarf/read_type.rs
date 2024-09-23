@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use error_stack::{Result, ResultExt};
 use gimli::{
     DW_TAG_array_type, DW_TAG_base_type, DW_TAG_class_type, DW_TAG_const_type,
@@ -8,7 +6,7 @@ use gimli::{
     DW_TAG_typedef, DW_TAG_union_type, DW_TAG_unspecified_type, DW_TAG_volatile_type, DwTag,
 };
 
-use crate::parsed::{Namespace, Offset, TypeComp, TypeInfo, TypePrim};
+use crate::parsed::{NamespaceMap, TypeComp, TypeInfo, TypePrim, TypesStage0};
 
 use super::unit::{bad, err_ctx, opt_ctx};
 use super::{
@@ -17,20 +15,17 @@ use super::{
 };
 
 /// Recursively read the type of the node
-pub fn read_types<'d, 'i, 'a, 'u, 't>(
-    node: Node<'i, 'a, 'u, 't>,
-    unit: &UnitCtx<'d, 'i>,
-    offset_to_ns: &BTreeMap<usize, Namespace<'i>>,
-    off2info: &mut BTreeMap<Offset, TypeInfo>,
-    merges: &mut Vec<(Offset, Offset)>,
+pub fn read_types<'i>(
+    node: Node<'i, '_, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
+    namespaces: &NamespaceMap<'i>,
+    types: &mut TypesStage0,
 ) -> Result<(), Error> {
     let entry = node.entry();
     if is_type_tag(entry.tag()) {
-        read_type_at_offset(entry.offset(), unit, offset_to_ns, off2info, merges)?;
+        read_type_at_offset(entry.offset(), unit, namespaces, types)?;
     }
-    unit.for_each_child(node, |child| {
-        read_types(child, unit, offset_to_ns, off2info, merges)
-    })?;
+    unit.for_each_child(node, |child| read_types(child, unit, namespaces, types))?;
 
     Ok(())
 }
@@ -61,26 +56,23 @@ pub fn is_type_tag(tag: DwTag) -> bool {
     )
 }
 
-pub fn read_type_at_offset<'d, 'i>(
+pub fn read_type_at_offset<'i>(
     offset: UnitOffset,
-    unit: &UnitCtx<'d, 'i>,
-    offset_to_ns: &BTreeMap<usize, Namespace<'i>>,
-    offset_to_ty: &mut BTreeMap<Offset, TypeInfo>,
-    merges: &mut Vec<(Offset, Offset)>,
+    unit: &UnitCtx<'_, 'i>,
+    namespaces: &NamespaceMap<'i>,
+    types: &mut TypesStage0,
 ) -> Result<TypeInfo, Error> {
     let global_offset = unit.to_global_offset(offset).into();
-    if let Some(info) = offset_to_ty.get(&global_offset) {
+    if let Some(info) = types.get(&global_offset) {
         return Ok(info.clone());
     }
     let entry = unit.entry_at(offset)?;
     let info = match entry.tag() {
         DW_TAG_structure_type | DW_TAG_class_type => {
-            read_struct_type(&entry, unit, offset_to_ns, offset_to_ty, merges)?
+            read_struct_type(&entry, unit, namespaces, types)?
         }
-        DW_TAG_union_type => read_union_type(&entry, unit, offset_to_ns, offset_to_ty, merges)?,
-        DW_TAG_enumeration_type => {
-            read_enum_type(&entry, unit, offset_to_ns, offset_to_ty, merges)?
-        }
+        DW_TAG_union_type => read_union_type(&entry, unit, namespaces, types)?,
+        DW_TAG_enumeration_type => read_enum_type(&entry, unit, namespaces, types)?,
         DW_TAG_unspecified_type => {
             // guess
             let name = unit.get_entry_name(&entry)?;
@@ -95,13 +87,12 @@ pub fn read_type_at_offset<'d, 'i>(
             }
         }
         DW_TAG_typedef => {
-            let name = unit.get_entry_name(&entry)?;
-            let namespace = unit.get_namespace(offset, offset_to_ns)?;
             match unit.get_entry_type_offset_optional(&entry)? {
                 // typedef to void.. just use void
                 None => TypeInfo::Prim(TypePrim::Void),
                 Some(x) => {
-                    TypeInfo::Typedef(namespace.get_with(name), unit.to_global_offset(x).into())
+                    let name = unit.get_namespaced_name(&entry, namespaces)?;
+                    TypeInfo::Typedef(name, unit.to_global_offset(x).into())
                 }
             }
         }
@@ -117,10 +108,10 @@ pub fn read_type_at_offset<'d, 'i>(
             match unit.get_entry_type_offset_optional(&entry)? {
                 None => TypeInfo::Prim(TypePrim::Void),
                 Some(x) => {
-                    let a = unit.to_global_offset(x).into();
-                    let b = unit.to_global_offset(entry.offset()).into();
-                    merges.push((a, b));
-                    read_type_at_offset(x, unit, offset_to_ns, offset_to_ty, merges)?
+                    let a = unit.to_global_offset(x);
+                    let b = unit.to_global_offset(entry.offset());
+                    types.add_merge(a, b);
+                    read_type_at_offset(x, unit, namespaces, types)?
                 }
             }
         }
@@ -135,7 +126,7 @@ pub fn read_type_at_offset<'d, 'i>(
             let subrange = opt_ctx!(unit, global_offset, Error::ExpectingChild, subrange)?;
             let subrange = subrange.entry();
             unit.check_tag(subrange, DW_TAG_subrange_type)?;
-            let count = unit.get_entry_count(&subrange)?;
+            let count = unit.get_entry_count(subrange)?;
             match count {
                 Some(count) => {
                     TypeInfo::Comp(TypeComp::Array(unit.to_global_offset(target).into(), count))
@@ -177,6 +168,6 @@ pub fn read_type_at_offset<'d, 'i>(
         }
     };
 
-    offset_to_ty.insert(global_offset, info.clone());
+    types.insert(global_offset, info.clone());
     Ok(info)
 }

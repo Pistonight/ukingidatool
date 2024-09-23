@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "common",
     "uking-extract",
+    "ukingidatool",
 ]
 resolver = "2"

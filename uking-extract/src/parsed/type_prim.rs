@@ -156,7 +156,7 @@ impl<T> Subroutine<T> {
 
     #[allow(dead_code)]
     pub fn into_iter(self) -> impl Iterator<Item = T> {
-        std::iter::once(self.retty).chain(self.params.into_iter())
+        std::iter::once(self.retty).chain(self.params)
     }
 }
 
@@ -165,16 +165,16 @@ impl<T> Subroutine<T> {
 ///
 /// The YAML string has the following format:
 /// - It should be a comma separated list of values, so it's a valid list in YAML when put between
-/// `[` and `]`
+///   `[` and `]`
 /// - Primitive types are string of the primitive representation:
 ///   - `void`
 ///   - `bool`
 ///   - `i`, `u`, `f` followed by the bit width
 /// - Name types (struct, enum, union` are string of the name surrounded by `""`, such as
-/// `"ksys::Foo"`
+///   `"ksys::Foo"`
 /// - Pointer types have 2 elements: the base type followed by `'*'`
 /// - Array types also have 2 elements: the base type followed by `[n]` (a list with a single
-/// element that's the element count
+///   element that's the element count
 /// - Subroutine types have 3 elements: the return type, followed by the string `()`, and a list of parameters
 ///   - Each parameter is a type, represented as a list with type YAML inside it
 /// - PTMF types have 4 elements: the return type, the `'(ptmf)'` string, the type for `this`, and a list of parameters
@@ -214,13 +214,19 @@ impl<T: TypeYaml> TypeYaml for TypeComp<T> {
         for t in iter {
             s.push_str(&format!(", [{}]", t.yaml_string()));
         }
-        s.push_str("]");
+        s.push(']');
         s
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Offset(usize);
+impl Offset {
+    #[allow(dead_code)]
+    pub const fn new_const(offset: usize) -> Self {
+        Self(offset)
+    }
+}
 
 impl std::fmt::Display for Offset {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -240,8 +246,8 @@ impl From<usize> for Offset {
     }
 }
 
-impl Into<usize> for Offset {
-    fn into(self) -> usize {
-        self.0
+impl From<Offset> for usize {
+    fn from(v: Offset) -> usize {
+        v.0
     }
 }

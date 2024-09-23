@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
-
 use error_stack::{report, Result, ResultExt};
 use gimli::{
     Abbreviations, AttributeValue, DW_AT_declaration, DW_AT_external, DwTag, UnitSectionOffset,
 };
 
-use crate::parsed::Namespace;
+use crate::parsed::NamespaceMap;
 
 use super::{Dwarf, Error, In, Node, Tree, Unit, UnitHeader, UnitOffset, DIE};
 
@@ -216,14 +214,33 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
         }
     }
 
-    /// Get the namespace of the entry at offset, using the namespace map
-    pub fn get_namespace<'m>(
+    /// Get namespaced name of the entry at offset, using the namespace map
+    pub fn get_namespaced_name(
         &self,
-        offset: UnitOffset,
-        map: &'m BTreeMap<usize, Namespace<'i>>,
-    ) -> Result<&'m Namespace<'i>, Error> {
-        let offset = self.to_global_offset(offset);
-        opt_ctx!(self, offset, Error::Namespace, map.get(&offset))
+        entry: &DIE<'i, '_, '_>,
+        map: &NamespaceMap<'i>,
+    ) -> Result<String, Error> {
+        let offset = self.to_global_offset(entry.offset());
+        let name = self.get_entry_name(entry)?;
+        let name = err_ctx!(self, offset, Error::Namespace, map.get(offset, name))?;
+        Ok(name)
+    }
+
+    /// Get the namespaced name of entry at offset, allowing missing DW_AT_name
+    pub fn get_namespaced_name_optional(
+        &self,
+        entry: &DIE<'i, '_, '_>,
+        map: &NamespaceMap<'i>,
+    ) -> Result<Option<String>, Error> {
+        let offset = self.to_global_offset(entry.offset());
+        let name = self.get_entry_name_optional(entry)?;
+        match name {
+            Some(name) => {
+                let name = err_ctx!(self, offset, Error::Namespace, map.get(offset, name))?;
+                Ok(Some(name))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Execute f on each child from an entry

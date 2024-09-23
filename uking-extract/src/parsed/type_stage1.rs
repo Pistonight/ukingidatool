@@ -12,44 +12,65 @@ pub struct TypesStage1 {
 }
 
 impl TypesStage1 {
-    pub fn new(off2info: BTreeMap<Offset, TypeInfo>, merges: Vec<(Offset, Offset)>) -> Self {
-        let off2bkt = off2info.keys().map(|k| (*k, *k)).collect();
-        let buckets = off2info.keys().map(|k| (*k, vec![*k])).collect();
-
-        let mut merger = Self {
+    pub fn new(
+        off2info: BTreeMap<Offset, TypeInfo>,
+        off2bkt: BTreeMap<Offset, Offset>,
+        buckets: BTreeMap<Offset, Vec<Offset>>,
+    ) -> Self {
+        Self {
             off2info,
             off2bkt,
             buckets,
-        };
-
-        for (a, b) in merges {
-            let a = a.into();
-            let b = b.into();
-            merger.merge(&a, &b);
-        }
-        merger.merge_typedefs();
-
-        merger
-    }
-
-    fn merge_typedefs(&mut self) {
-        let mut typedefs = Vec::new();
-        for (offset, ty) in &self.off2info {
-            if let TypeInfo::Typedef(_, ty_offset) = ty {
-                typedefs.push((*ty_offset, *offset));
-            }
-        }
-        for (a, b) in typedefs {
-            self.merge(&a, &b);
         }
     }
+    // pub fn new2(off2info: BTreeMap<Offset, TypeInfo>, merges: Vec<(Offset, Offset)>) -> Self {
+    //     let off2bkt = off2info.keys().map(|k| (*k, *k)).collect();
+    //     let buckets = off2info.keys().map(|k| (*k, vec![*k])).collect();
+    //
+    //     let mut merger = Self {
+    //         off2info,
+    //         off2bkt,
+    //         buckets,
+    //     };
+    //
+    //     for (a, b) in merges {
+    //         let a = a.into();
+    //         let b = b.into();
+    //         merger.merge(&a, &b);
+    //     }
+    //     merger.merge_typedefs();
+    //
+    //     merger
+    // }
+    //
+    // fn merge_typedefs(&mut self) {
+    //     let mut typedefs = Vec::new();
+    //     for (offset, ty) in &self.off2info {
+    //         if let TypeInfo::Typedef(_, ty_offset) = ty {
+    //             typedefs.push((*ty_offset, *offset));
+    //         }
+    //     }
+    //     for (a, b) in typedefs {
+    //         self.merge(&a, &b);
+    //     }
+    // }
 
     /// Merge the bucket containing b into the bucket containing a
-    fn merge(&mut self, off_a: &Offset, off_b: &Offset) {
+    pub fn merge(&mut self, off_a: &Offset, off_b: &Offset) {
         let bkt_a = *self.off2bkt.get(off_a).unwrap();
         let bkt_b = *self.off2bkt.get(off_b).unwrap();
         if bkt_a == bkt_b {
             return;
+        }
+        #[cfg(feature = "debug-merge")]
+        {
+            let bucket_a = self.buckets.get(&bkt_a).unwrap();
+            let bucket_b = self.buckets.get(&bkt_b).unwrap();
+            if bucket_a.contains(&super::DEBUG_MERGE_OFFSET)
+                || bucket_b.contains(&super::DEBUG_MERGE_OFFSET)
+            {
+                println!("Merge Stage 1: {} {}", off_a, off_b);
+            }
         }
         // offsets in b_bucket need to change their offset_to_bucket
         let bucket_b = self.buckets.remove(&bkt_b).unwrap();
@@ -110,33 +131,27 @@ impl TypesStage1 {
                     return Err(TypeError::PrimitiveMismatch.into());
                 }
                 self.merge(off_a, off_b);
-                return Ok(());
+                Ok(())
             }
             (TypeInfo::Typedef(_, off_a2), _) => {
                 seen.push((*off_a, *off_b));
                 let result = self.merge_recur(off_a2, off_b, "Typedef left", seen);
                 seen.pop();
-                if result.is_ok() {
-                    self.merge(off_a, off_b);
-                }
-                return result;
+                result?;
+                self.merge(off_a, off_b);
+                Ok(())
             }
             (_, TypeInfo::Typedef(_, off_b2)) => {
                 seen.push((*off_a, *off_b));
                 let result = self.merge_recur(off_a, off_b2, "Typedef right", seen);
                 seen.pop();
-                if result.is_ok() {
-                    self.merge(off_a, off_b);
-                }
-                return result;
+                result?;
+                self.merge(off_a, off_b);
+                Ok(())
             }
             (TypeInfo::Struct(a), TypeInfo::Struct(b)) => {
                 // for declaration, name and only should match
                 if a.is_decl || b.is_decl {
-                    // name must match
-                    if a.name != b.name {
-                        return Err(TypeError::NameMismatch.into());
-                    }
                     self.merge(off_a, off_b);
                     return Ok(());
                 }
@@ -177,19 +192,13 @@ impl TypesStage1 {
                         }
                     }
                     seen.pop();
-                    if r.is_err() {
-                        return r;
-                    }
+                    r?
                 }
                 self.merge(off_a, off_b);
-                return Ok(());
+                Ok(())
             }
             (TypeInfo::Union(a), TypeInfo::Union(b)) => {
                 if a.is_decl || b.is_decl {
-                    // name must match
-                    if a.name != b.name {
-                        return Err(TypeError::NameMismatch.into());
-                    }
                     self.merge(off_a, off_b);
                     return Ok(());
                 }
@@ -220,18 +229,13 @@ impl TypesStage1 {
                         }
                     }
                     seen.pop();
-                    if r.is_err() {
-                        return r;
-                    }
+                    r?
                 }
                 self.merge(off_a, off_b);
-                return Ok(());
+                Ok(())
             }
             (TypeInfo::Enum(a), TypeInfo::Enum(b)) => {
                 if a.is_decl || b.is_decl {
-                    if a.name != b.name {
-                        return Err(TypeError::NameMismatch.into());
-                    }
                     self.merge(off_a, off_b);
                     return Ok(());
                 }
@@ -247,16 +251,15 @@ impl TypesStage1 {
                     }
                 }
                 self.merge(off_a, off_b);
-                return Ok(());
+                Ok(())
             }
             (TypeInfo::Comp(TypeComp::Ptr(a)), TypeInfo::Comp(TypeComp::Ptr(b))) => {
                 seen.push((*off_a, *off_b));
-                let result = self.merge_recur(&*a, &*b, "Merging pointer inner type", seen);
+                let result = self.merge_recur(a, b, "Merging pointer inner type", seen);
                 seen.pop();
-                if result.is_ok() {
-                    self.merge(off_a, off_b);
-                }
-                return result;
+                result?;
+                self.merge(off_a, off_b);
+                Ok(())
             }
             (
                 TypeInfo::Comp(TypeComp::Array(a, a_len)),
@@ -267,12 +270,12 @@ impl TypesStage1 {
                         .attach_printable(format!("{} != {}", a_len, b_len));
                 }
                 seen.push((*off_a, *off_b));
-                let result = self.merge_recur(&a, &b, "Merging array inner type", seen);
+                let result = self.merge_recur(a, b, "Merging array inner type", seen);
                 seen.pop();
                 if result.is_ok() {
                     self.merge(off_a, off_b);
                 }
-                return result;
+                result
             }
             (
                 TypeInfo::Comp(TypeComp::Subroutine(s_a)),
@@ -299,16 +302,16 @@ impl TypesStage1 {
                     self.merge(off_a, off_b);
                 }
                 seen.pop();
-                return r;
+                r
             }
             (
                 TypeInfo::Comp(TypeComp::Ptmf(a_this, a_sub)),
                 TypeInfo::Comp(TypeComp::Ptmf(b_this, b_sub)),
             ) => {
                 seen.push((*off_a, *off_b));
-                if !self
+                if self
                     .merge_recur(a_this, b_this, "Merging ptmf this type", seen)
-                    .is_ok()
+                    .is_err()
                 {
                     seen.pop();
                     return Err(TypeError::ThisTypeMismatch.into());
@@ -339,9 +342,9 @@ impl TypesStage1 {
                     self.merge(off_a, off_b);
                 }
                 seen.pop();
-                return r;
+                r
             }
-            _ => return Err(TypeError::Unrelated.into()),
+            _ => Err(TypeError::Unrelated.into()),
         }
     }
 

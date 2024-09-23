@@ -10,9 +10,9 @@ use super::unit::{bad, err_ctx, opt_ctx};
 use super::{Error, UnitCtx, DIE};
 
 /// Get TypeInfo for a DW_TAG_base_type
-pub fn read_base_type<'d, 'i, 'a, 'u>(
-    entry: &DIE<'i, 'a, 'u>,
-    unit: &UnitCtx<'d, 'i>,
+pub fn read_base_type<'i>(
+    entry: &DIE<'i, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
 ) -> Result<TypePrim, Error> {
     let offset = unit.to_global_offset(entry.offset());
     let encoding = err_ctx!(
@@ -62,18 +62,14 @@ pub fn read_base_type<'d, 'i, 'a, 'u>(
         (DW_ATE_float, 0x10) => Ok(TypePrim::F128),
         _ => {
             // TODO complete list above
-            return bad!(
+            bad!(
                 unit,
                 offset,
                 Error::BadEntryAttrTypes(
                     [DW_AT_encoding.to_string(), DW_AT_byte_size.to_string(),].join(", ")
                 )
             )
-            .attach_printable(format!(
-                "Got: encoding={}, bytes={}",
-                encoding.to_string(),
-                byte_size
-            ));
+            .attach_printable(format!("Got: encoding={}, bytes={}", encoding, byte_size))
         }
     }
 }

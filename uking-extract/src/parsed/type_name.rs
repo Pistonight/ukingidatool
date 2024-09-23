@@ -51,7 +51,7 @@ impl TypeName {
         self.add_referenced_names(&mut names);
         names
     }
-    fn add_referenced_names<'a>(&'a self, names: &mut Vec<String>) {
+    fn add_referenced_names(&self, names: &mut Vec<String>) {
         match self {
             Self::Prim(_) => (),
             Self::Name(name) => {
@@ -306,21 +306,12 @@ impl Ord for TypeName {
             _ => (),
         }
 
-        // prefer ksys
-        let self_ksys = self_name.starts_with("ksys");
-        let other_ksys = other_name.starts_with("ksys");
-        match (self_ksys, other_ksys) {
-            (true, false) => return std::cmp::Ordering::Greater,
-            (false, true) => return std::cmp::Ordering::Less,
-            _ => (),
-        }
-
-        // prefer uking
-        let self_uking = self_name.starts_with("uking");
-        let other_uking = other_name.starts_with("uking");
-        match (self_uking, other_uking) {
-            (true, false) => return std::cmp::Ordering::Greater,
-            (false, true) => return std::cmp::Ordering::Less,
+        // prefer fewer underscores
+        let self_underscores = self_name.chars().filter(|c| *c == '_').count();
+        let other_underscores = other_name.chars().filter(|c| *c == '_').count();
+        match self_underscores.cmp(&other_underscores) {
+            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
+            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
             _ => (),
         }
 
@@ -342,19 +333,28 @@ impl Ord for TypeName {
             _ => (),
         }
 
-        // prefer fewer underscores
-        let self_underscores = self_name.chars().filter(|c| *c == '_').count();
-        let other_underscores = other_name.chars().filter(|c| *c == '_').count();
-        match self_underscores.cmp(&other_underscores) {
-            std::cmp::Ordering::Greater => return std::cmp::Ordering::Less,
-            std::cmp::Ordering::Less => return std::cmp::Ordering::Greater,
-            _ => (),
-        }
-
         // prefer std
         let self_std = self_name.starts_with("std");
         let other_std = other_name.starts_with("std");
         match (self_std, other_std) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
+        }
+
+        // prefer ksys
+        let self_ksys = self_name.starts_with("ksys");
+        let other_ksys = other_name.starts_with("ksys");
+        match (self_ksys, other_ksys) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            _ => (),
+        }
+
+        // prefer uking
+        let self_uking = self_name.starts_with("uking");
+        let other_uking = other_name.starts_with("uking");
+        match (self_uking, other_uking) {
             (true, false) => return std::cmp::Ordering::Greater,
             (false, true) => return std::cmp::Ordering::Less,
             _ => (),

@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use crate::{util::ProgressPrinter, worker::Pool};
+use common::ProgressPrinter;
+
+use crate::worker::Pool;
 
 use super::{
-    Bucket, BucketType, NamespaceMap, Offset, TypeComp, TypeInfo, TypesStage4, VtableInfo,
+    Bucket, BucketType, NamespaceMap, Offset, TypeComp, TypeInfo, TypePrim, TypesStage4, VtableInfo,
 };
 
 pub struct TypesStage3 {
@@ -13,6 +15,7 @@ pub struct TypesStage3 {
     buckets: BTreeMap<Offset, Bucket>,
     iteration: usize,
     progress: ProgressPrinter,
+    fabrication: usize,
 }
 
 impl TypesStage3 {
@@ -32,6 +35,7 @@ impl TypesStage3 {
             buckets,
             iteration: 1,
             progress,
+            fabrication: usize::MAX - 1,
         }
     }
 
@@ -73,11 +77,6 @@ impl TypesStage3 {
         Self::merge_buckets_by_filter(s, namespaces, |_, v| v.type_ == BucketType::Union);
         Self::merge_buckets_by_filter(s, namespaces, |_, v| v.type_ == BucketType::Comp);
         Self::merge_buckets_by_filter(s, namespaces, |_, _| true);
-        // {
-        //     let s = s.read().unwrap();
-        //     let count = s.buckets.len();
-        //     println!("Total buckets: {}", count);
-        // }
     }
 
     fn merge_buckets_by_filter(
@@ -89,7 +88,7 @@ impl TypesStage3 {
         loop {
             {
                 let mut s = s.write().unwrap();
-                s.reduce_and_check_buckets(namespaces);
+                s.reduce(namespaces);
             }
             let keys = {
                 let mut s = s.write().unwrap();
@@ -157,11 +156,155 @@ impl TypesStage3 {
         merge_sets
     }
 
-    fn reduce_and_check_buckets(&mut self, namespaces: &NamespaceMap) {
+    fn reduce(&mut self, namespaces: &NamespaceMap) {
+        // reduce it once first to get primitive buckets reduced
         for (bucket_key, bucket) in &mut self.buckets {
             bucket.reduce(&self.off2info, namespaces);
             bucket.check(bucket_key, &self.off2info);
         }
+        let mut merges = Vec::new();
+        let mut modifications = Vec::new();
+        let mut new_types = Vec::new();
+        // simplify unions
+        for (off, info) in &self.off2info {
+            let mut info = match info {
+                TypeInfo::Union(x) => x.clone(),
+                _ => continue,
+            };
+            if info.is_decl {
+                continue;
+            }
+            // has any anonymous member?
+            if info.members.iter().any(|m| m.0.is_none()) {
+                // remove non-anonymous members
+                info.members.retain(|m| m.0.is_none());
+            }
+            ///// This optimization is unstable and somehow causes unions of different sizes to be
+            ///// merged
+            // // small pritimive simplification -
+            // // simplify small unions with a primitive member to a primitive
+            // // unsigned integer
+            // if info.members.iter().any(|m| {
+            //     let bkt = self.off2bkt.get(&m.1).unwrap();
+            //     let bucket = self.buckets.get(bkt).unwrap();
+            //     bucket.type_ == BucketType::Prim
+            // }) {
+            //     match info.size {
+            //         1 => {
+            //             let prim_info = TypeInfo::Prim(TypePrim::U8);
+            //             let prim_offset = self.fabricate_offset();
+            //             new_types.push(prim_offset);
+            //             modifications.push((prim_offset, prim_info));
+            //             merges.push((*off, prim_offset));
+            //             #[cfg(feature = "debug-union-opt")]
+            //             {
+            //                 println!("Simplified union to U8: {:?}", off);
+            //             }
+            //             continue
+            //         }
+            //         2 => {
+            //             let prim_info = TypeInfo::Prim(TypePrim::U16);
+            //             let prim_offset = self.fabricate_offset();
+            //             new_types.push(prim_offset);
+            //             modifications.push((prim_offset, prim_info));
+            //             merges.push((*off, prim_offset));
+            //             #[cfg(feature = "debug-union-opt")]
+            //             {
+            //                 println!("Simplified union to U16: {:?}", off);
+            //             }
+            //             continue
+            //         }
+            //         4 => {
+            //             let prim_info = TypeInfo::Prim(TypePrim::U32);
+            //             let prim_offset = self.fabricate_offset();
+            //             new_types.push(prim_offset);
+            //             modifications.push((prim_offset, prim_info));
+            //             merges.push((*off, prim_offset));
+            //             #[cfg(feature = "debug-union-opt")]
+            //             {
+            //                 println!("Simplified union to U32: {:?}", off);
+            //             }
+            //             continue
+            //         }
+            //         8 => {
+            //             let prim_info = TypeInfo::Prim(TypePrim::U64);
+            //             let prim_offset = self.fabricate_offset();
+            //             new_types.push(prim_offset);
+            //             modifications.push((prim_offset, prim_info));
+            //             merges.push((*off, prim_offset));
+            //             #[cfg(feature = "debug-union-opt")]
+            //             {
+            //                 println!("Simplified union to U64: {:?}", off);
+            //             }
+            //             continue
+            //         }
+            //         _=>{}
+            //     }
+            // }
+            // did we remove the largest member?
+            if info.members.iter().all(|m| {
+                let m_info = self.off2info.get(&m.1).unwrap();
+                let size = m_info.slow_size(&self.off2info).unwrap_or(0);
+                size != info.size
+            }) {
+                // reduce union to byte array
+                let byte_info = TypeInfo::Prim(TypePrim::U8);
+                let byte_offset = self.fabricate_offset();
+                new_types.push(byte_offset);
+                modifications.push((byte_offset, byte_info));
+                let array_info = TypeInfo::Comp(TypeComp::Array(byte_offset, info.size));
+                let array_offset = self.fabricate_offset();
+                new_types.push(array_offset);
+                modifications.push((array_offset, array_info));
+
+                merges.push((*off, array_offset));
+                continue;
+            }
+            // are all members the same type?
+            let tbkt = info
+                .members
+                .iter()
+                .map(|m| *self.off2bkt.get(&m.1).unwrap())
+                .collect::<BTreeSet<_>>();
+            if tbkt.len() == 1 {
+                // merge into that type
+                merges.push((*off, *tbkt.iter().next().unwrap()));
+                continue;
+            }
+            modifications.push((*off, TypeInfo::Union(info)));
+        }
+
+        // apply new types
+        for off in new_types {
+            self.off2bkt.insert(off, off);
+            self.buckets.insert(off, Bucket::new(vec![off]));
+        }
+        // apply modifications
+        for (off, info) in modifications {
+            self.off2info.insert(off, info);
+        }
+        // apply merges
+        for (a, b) in merges {
+            self.merge_all(&a, &[b]);
+        }
+        self.reset_fabrication();
+        // reduce again to process the new merges
+        for (bucket_key, bucket) in &mut self.buckets {
+            bucket.reduce(&self.off2info, namespaces);
+            bucket.check(bucket_key, &self.off2info);
+        }
+    }
+
+    fn fabricate_offset(&self) -> Offset {
+        let mut off = self.fabrication;
+        while self.off2info.contains_key(&off.into()) {
+            off -= 1;
+        }
+        off.into()
+    }
+
+    fn reset_fabrication(&mut self) {
+        self.fabrication = self.fabricate_offset().into();
     }
 
     fn can_merge_bucket(&self, bkt_a: &Offset, bkt_b: &Offset) -> bool {
@@ -212,7 +355,7 @@ impl TypesStage3 {
                                 if a.enumerators.len() != b.enumerators.len() {
                                     continue;
                                 }
-                                if a.enumerators.len() == 0 {
+                                if a.enumerators.is_empty() {
                                     if a.name != b.name {
                                         continue;
                                     }
@@ -223,7 +366,7 @@ impl TypesStage3 {
                         }
                     }
                 }
-                return false;
+                false
             }
             (BucketType::Struct, BucketType::Struct) => {
                 for a in &bucket_a.candidates {
@@ -295,7 +438,7 @@ impl TypesStage3 {
                         }
                     }
                 }
-                return false;
+                false
             }
             (BucketType::Union, BucketType::Union) => {
                 // let mut is_a_all_decl = true;
@@ -360,7 +503,7 @@ impl TypesStage3 {
                         }
                     }
                 }
-                return false;
+                false
             }
             (BucketType::Comp, BucketType::Comp) => {
                 for a in &bucket_a.candidates {
@@ -457,9 +600,9 @@ impl TypesStage3 {
                         }
                     }
                 }
-                return false;
+                false
             }
-            _ => return false,
+            _ => false,
         }
     }
 
@@ -473,7 +616,7 @@ impl TypesStage3 {
                 // shouldn't happen, just safe guard
                 continue;
             }
-            if let Some(bucket_b) = self.buckets.remove(&bkt_b) {
+            if let Some(bucket_b) = self.buckets.remove(bkt_b) {
                 to_change.extend(bucket_b.original_candidates);
             }
         }
@@ -491,7 +634,7 @@ impl TypesStage3 {
             progress.print(i, "");
             let mut vtable = VtableInfo::default();
             for off in &bucket.original_candidates {
-                let info = self.off2info.get(&off).unwrap();
+                let info = self.off2info.get(off).unwrap();
                 if let TypeInfo::Struct(s) = info {
                     vtable.merge(&s.vtable);
                 }

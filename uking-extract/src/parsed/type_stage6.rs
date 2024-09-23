@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{report, Result, ResultExt};
 
-use crate::util::ProgressPrinter;
+use common::ProgressPrinter;
 
 use super::{
     Bucket, BucketType, EnumDef, EnumInfo, MemberDef, Offset, StructDef, StructInfo, TypeComp,
@@ -14,6 +14,7 @@ pub struct TypesStage6 {
     buckets: BTreeMap<Offset, Bucket>,
     bkt2name: BTreeMap<Offset, TypeName>,
     bkt2size: BTreeMap<Offset, Option<usize>>,
+    referenced_names: NameRefMap,
 }
 
 impl TypesStage6 {
@@ -30,6 +31,7 @@ impl TypesStage6 {
             buckets,
             bkt2name: names,
             bkt2size: sizes,
+            referenced_names: NameRefMap::default(),
         }
     }
 
@@ -38,23 +40,55 @@ impl TypesStage6 {
         self.bkt2name.get(bkt).unwrap()
     }
 
-    pub fn create_defs(&self) -> Result<BTreeMap<String, TypeDef>, TypeError> {
+    pub fn create_defs(&mut self) -> Result<BTreeMap<String, TypeDef>, TypeError> {
         let progress = ProgressPrinter::new(self.buckets.len(), "Create type definitions");
         let mut referenced_names = NameRefMap::default();
         let mut name_to_def = BTreeMap::new();
         for (i, bkt) in self.buckets.keys().enumerate() {
             let name = self.bkt2name.get(bkt).unwrap();
             progress.print(i, name);
-            self.create_def_for_bucket(bkt, &mut name_to_def, &mut referenced_names)?;
+            self.create_def_for_bucket(bkt, &mut name_to_def, &mut referenced_names)
+                .attach_printable_lazy(|| format!("While creating definition for type {}", name))?;
         }
         progress.done();
-        for (x, referers) in referenced_names.0 {
-            if !name_to_def.contains_key(&x) {
+        // check if all referenced names have definitions
+        for (x, referers) in &referenced_names.0 {
+            if !name_to_def.contains_key(x) {
                 return Err(report!(TypeError::BrokenTypeRef(x.clone())))
                     .attach_printable(format!("Referenced by {:?}", referers));
             }
         }
+        self.referenced_names = referenced_names;
         Ok(name_to_def)
+    }
+
+    pub fn mark_referenced(&mut self, referr: &str, refed: &Offset) {
+        let refed = self.get_name(refed).clone();
+        self.referenced_names.add(referr, &refed);
+    }
+
+    pub fn check_reference(&self, types: &BTreeMap<String, TypeDef>) -> Result<(), TypeError> {
+        // check if all referenced names have definitions
+        for (x, referers) in &self.referenced_names.0 {
+            if !types.contains_key(x) {
+                return Err(report!(TypeError::BrokenTypeRef(x.clone())))
+                    .attach_printable(format!("Referenced by {:?}", referers));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_and_gc_types(
+        &mut self,
+        types: &mut BTreeMap<String, TypeDef>,
+    ) -> Result<(), TypeError> {
+        for name in types.keys().cloned().collect::<Vec<_>>() {
+            if !self.referenced_names.0.contains_key(&name) {
+                types.remove(&name);
+            }
+        }
+        self.check_reference(types)?;
+        Ok(())
     }
 
     fn create_def_for_bucket<'a>(
@@ -68,6 +102,10 @@ impl TypesStage6 {
             Some(x) => x,
             None => return Ok(None),
         };
+        #[cfg(feature = "debug-create-def")]
+        {
+            println!("Creating def for {}", name);
+        }
         let key = name.clone();
         let def = match info {
             TypeInfo::Enum(x) => {
@@ -90,23 +128,41 @@ impl TypesStage6 {
                 if x.is_decl {
                     return Ok(None);
                 }
+                let mut size = 0;
                 let mut members: Vec<(String, String)> = Vec::with_capacity(x.members.len());
                 for (i, (name, offset)) in x.members.into_iter().enumerate() {
                     let mut name = name.unwrap_or_else(|| format!("_{}", i));
                     while members.iter().any(|x| x.0 == name) {
                         name.push('_');
                     }
-                    let ty_name = self
-                        .bkt2name
-                        .get(self.off2bkt.get(&offset).unwrap())
-                        .unwrap();
-                    referenced_names.add(&key, &ty_name);
+                    let bkt = self.off2bkt.get(&offset).unwrap();
+                    let member_size = self.bkt2size.get(bkt).unwrap()
+                        .ok_or(report!(TypeError::InvalidLayout))
+                        .attach_printable_lazy(|| {
+                            format!("While resolving union member `{name}`, cannot find size for type {}", offset)
+                        })?;
+                    size = size.max(member_size);
+                    let ty_name = self.bkt2name.get(bkt).unwrap();
+                    referenced_names.add(&key, ty_name);
                     let ty_yaml = ty_name.yaml_string();
                     members.push((name, ty_yaml))
                 }
+                if x.size < size {
+                    return Err(report!(TypeError::InvalidLayout).attach_printable(format!(
+                        "Union `{name}` has size 0x{:x} smaller than its largest member 0x{:x}",
+                        x.size, size
+                    )));
+                }
+                let tail_padding = x.size - size;
+                let alignment = if tail_padding == 0 {
+                    1
+                } else {
+                    2usize.pow(tail_padding.ilog2() + 1)
+                };
                 TypeDef::Union(UnionDef {
                     name,
                     size: x.size,
+                    alignment,
                     members,
                 })
             }
@@ -233,6 +289,27 @@ impl TypesStage6 {
         name2def: &mut BTreeMap<String, TypeDef>,
         referenced_names: &mut NameRefMap,
     ) -> Result<StructDef, TypeError> {
+        // if there is no vtable only one member and it's a struct, inline that struct's member
+        if info.vtable.is_empty() && info.members.len() == 1 {
+            let member = &info.members[0];
+            let member_bkt = self.off2bkt.get(&member.ty_offset).unwrap();
+            let member_bucket = self.buckets.get(member_bkt).unwrap();
+            if member_bucket.type_ == BucketType::Struct {
+                if let Some(TypeDef::Struct(def)) =
+                    self.create_def_for_bucket(member_bkt, name2def, referenced_names)?
+                {
+                    return Ok(StructDef {
+                        name: name.to_string(),
+                        vtable: Vec::new(),
+                        size: info.size,
+                        alignment: def.alignment,
+                        members: def.members.clone(),
+                    });
+                }
+            }
+        }
+
+        // size of the members in this struct's layout, calculated from offsets
         let mut member_sizes: Vec<usize> = Vec::with_capacity(info.members.len());
         for i in 0..info.members.len() {
             let offset = info.members[i].offset;
@@ -244,9 +321,49 @@ impl TypesStage6 {
             member_sizes.push(next_offset - offset);
         }
 
+        // calculate tail padding
+        let alignment = if let Some(member) = info.members.last() {
+            let bkt = self.off2bkt.get(&member.ty_offset).unwrap();
+            let size = self
+                .bkt2size
+                .get(bkt)
+                .unwrap()
+                .ok_or(report!(TypeError::InvalidLayout))
+                .attach_printable_lazy(|| {
+                    format!(
+                        "While resolving tail padding for `{name}`, cannot find size for type {}",
+                        member.ty_offset
+                    )
+                })?;
+            let space = *member_sizes.last().unwrap();
+            if space < size {
+                let r = Err(report!(TypeError::InvalidLayout).attach_printable(format!(
+                    "Tail padding for member `{:?}` is negative: space=0x{:x}, size=0x{:x}",
+                    member.name, space, size
+                )));
+                return r;
+            }
+            let tail_padding = space - size;
+            if tail_padding == 0 {
+                1
+            } else {
+                2usize.pow(tail_padding.ilog2() + 1)
+            }
+        } else {
+            1
+        };
+
+        // MEMBERS ====
         let mut members: Vec<MemberDef> = Vec::new();
         for (m, m_size) in info.members.into_iter().zip(member_sizes.into_iter()) {
             let mut m_name = m.name.unwrap_or_else(|| format!("field_{:x}", m.offset));
+            // replace vfptr with IDA standard
+            let is_vfptr = if m_name.starts_with("_vptr$") {
+                m_name = "__vftable".to_string();
+                true
+            } else {
+                false
+            };
             while members.iter().any(|x| x.name == m_name) {
                 m_name.push('_');
             }
@@ -295,24 +412,26 @@ impl TypesStage6 {
                         let m = MemberDef {
                             offset: m.offset + base_member.offset,
                             name: base_m_name,
-                            is_base: true,
+                            // we don't want to set baseclass flag in IDA
+                            // so making this false
+                            is_base: false,
                             ty_yaml: base_member.ty_yaml.clone(),
                         };
                         members.push(m);
                     }
                     continue;
                 }
-            } else {
-                if m_size == 0 {
-                    let r = report!(TypeError::InvalidLayout).attach_printable(format!(
-                        "Non-base Member `{}` has zero size in the struct layout",
-                        m_name
-                    ));
-                    return Err(r);
-                }
+            } else if m_size == 0 {
+                let r = report!(TypeError::InvalidLayout).attach_printable(format!(
+                    "Non-base Member `{}` has zero size in the struct layout",
+                    m_name
+                ));
+                return Err(r);
             }
 
-            if m.is_bitfield {
+            let ty_yaml = if is_vfptr {
+                TypeName::pointer(TypeName::Name(format!("{name}_vtbl"))).yaml_string()
+            } else if m.is_bitfield {
                 let ty_name = match m.byte_size {
                     1 => TypeName::Prim(TypePrim::U8),
                     2 => TypeName::Prim(TypePrim::U16),
@@ -327,27 +446,39 @@ impl TypesStage6 {
                         return Err(r);
                     }
                 };
-                let ty_yaml = ty_name.yaml_string();
-                let m = MemberDef {
-                    offset: m.offset,
-                    name: m_name,
-                    is_base: m.is_base,
-                    ty_yaml,
-                };
-                members.push(m);
+                ty_name.yaml_string()
             } else {
+                // if the member is a struct with only one member and no vtable,
+                // inline it
+                let member_bucket = self.buckets.get(bkt).unwrap();
                 let ty_name = self.bkt2name.get(bkt).unwrap();
-                referenced_names.add(&name, &ty_name);
-                let ty_yaml = ty_name.yaml_string();
-                let m = MemberDef {
-                    offset: m.offset,
-                    name: m_name,
-                    is_base: m.is_base,
-                    ty_yaml,
-                };
-                members.push(m);
-            }
+                let mut ty_yaml = ty_name.yaml_string();
+                let mut inlined = false;
+                if member_bucket.type_ == BucketType::Struct {
+                    if let Some(TypeDef::Struct(def)) =
+                        self.create_def_for_bucket(bkt, name2def, referenced_names)?
+                    {
+                        if def.members.len() == 1 {
+                            ty_yaml = def.members[0].ty_yaml.clone();
+                            inlined = true;
+                        }
+                    }
+                }
+                if !inlined {
+                    referenced_names.add(name, ty_name);
+                }
+                ty_yaml
+            };
+            let m = MemberDef {
+                offset: m.offset,
+                name: m_name,
+                is_base: m.is_base,
+                ty_yaml,
+            };
+            members.push(m);
         }
+
+        // VTABLE    ====
         let mut vtable: Vec<(String, String)> = Vec::with_capacity(info.vtable.len());
         for vfptr in info.vtable.into_iter() {
             let mut v_name = vfptr.name;
@@ -374,7 +505,7 @@ impl TypesStage6 {
                 argty_names,
             )));
             let ty_name = TypeName::pointer(ty_name);
-            referenced_names.add(&name, &ty_name);
+            referenced_names.add(name, &ty_name);
 
             vtable.push((v_name, ty_name.yaml_string()))
         }
@@ -383,6 +514,7 @@ impl TypesStage6 {
             name: name.to_string(),
             vtable,
             size: info.size,
+            alignment,
             members,
         };
 
@@ -390,13 +522,13 @@ impl TypesStage6 {
     }
 }
 
+/// Map of referenced type -> referrers
 #[derive(Default)]
 struct NameRefMap(BTreeMap<String, BTreeSet<String>>);
 impl NameRefMap {
-    fn add(&mut self, name: &str, refed: &TypeName) {
-        let e = self.0.entry(name.to_string()).or_default();
+    fn add(&mut self, referrer: &str, refed: &TypeName) {
         for r in refed.referenced_names() {
-            e.insert(r);
+            self.0.entry(r).or_default().insert(referrer.to_string());
         }
     }
 }

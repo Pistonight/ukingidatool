@@ -32,9 +32,9 @@ pub fn read_namespace<'i>(units: &[UnitCtx<'_, 'i>]) -> Result<NamespaceMap<'i>,
     Ok(offset_to_ns.into())
 }
 
-fn read_namespace_recur<'d, 'i, 'a, 'u, 't>(
-    node: Node<'i, 'a, 'u, 't>,
-    unit: &UnitCtx<'d, 'i>,
+fn read_namespace_recur<'i>(
+    node: Node<'i, '_, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
     namespace: &mut Namespace<'i>,
     offset_to_ns: &mut BTreeMap<usize, Namespace<'i>>,
 ) -> Result<(), Error> {

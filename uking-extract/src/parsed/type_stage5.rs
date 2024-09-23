@@ -9,7 +9,7 @@ pub struct TypesStage5 {
     off2info: BTreeMap<Offset, TypeInfo>,
     off2bkt: BTreeMap<Offset, Offset>,
     buckets: BTreeMap<Offset, Bucket>,
-    names: BTreeMap<Offset, TypeName>,
+    bkt2name: BTreeMap<Offset, TypeName>,
 }
 
 impl TypesStage5 {
@@ -23,16 +23,16 @@ impl TypesStage5 {
             off2info,
             off2bkt,
             buckets,
-            names,
+            bkt2name: names,
         }
     }
     pub fn resolve_into_stage6(self) -> Result<TypesStage6, TypeError> {
-        let sizes = self.resolve_sizes().unwrap();
+        let sizes = self.resolve_sizes()?;
         Ok(TypesStage6::new(
             self.off2info,
             self.off2bkt,
             self.buckets,
-            self.names,
+            self.bkt2name,
             sizes,
         ))
     }
@@ -48,7 +48,8 @@ impl TypesStage5 {
                 if bkt2size.contains_key(bkt) {
                     continue;
                 }
-                let size = bucket.get_size(&self.off2info, &self.off2bkt, &bkt2size)?;
+                let size =
+                    bucket.get_size(&self.off2info, &self.off2bkt, &self.bkt2name, &bkt2size)?;
                 if let BucketSize::Size(size) = size {
                     #[cfg(feature = "debug-resolve-size")]
                     {
@@ -66,18 +67,17 @@ impl TypesStage5 {
                 bkt2size.insert(*bkt, None);
             }
         }
-        // if bkt2size.len() != self.buckets.len() {
-        //     #[cfg(feature = "debug-resolve-size")]
-        //     {
-        //         println!("Unresolved sizes:");
-        //         for (bkt, bucket) in &self.buckets {
-        //             if !bkt2size.contains_key(bkt) {
-        //                 println!("  {}: {:?}", bkt, bucket.names);
-        //             }
-        //         }
-        //     }
-        //     return Err(report!(SizeError::UnresolvedSize));
-        // }
+        #[cfg(feature = "debug-resolve-size")]
+        {
+            if bkt2size.len() != self.buckets.len() {
+                println!("Unresolved sizes:");
+                for (bkt, bucket) in &self.buckets {
+                    if !bkt2size.contains_key(bkt) {
+                        println!("  {}: {:?}", bkt, bucket.names);
+                    }
+                }
+            }
+        }
         Ok(bkt2size)
     }
 }

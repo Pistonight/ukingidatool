@@ -57,11 +57,11 @@ impl<'d, 'i> UnitCtx<'d, 'i> {
                 Ok(Some(vel.try_into().unwrap()))
             }
             _ => {
-                return bad!(
+                bad!(
                     self,
                     offset,
                     Error::BadEntryAttrType(DW_AT_virtuality, "Virtuality")
-                );
+                )
             }
         }
     }

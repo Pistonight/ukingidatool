@@ -5,8 +5,6 @@ pub enum TypeError {
     MergeFail,
     #[error("Primitive type mismatch")]
     PrimitiveMismatch,
-    #[error("Name mismatch for declaration")]
-    NameMismatch,
     #[error("Size mismatch")]
     SizeMismatch,
     #[error("Member length mismatch")]

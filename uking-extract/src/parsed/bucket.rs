@@ -36,28 +36,30 @@ impl Bucket {
         &self,
         off2info: &BTreeMap<Offset, TypeInfo>,
         off2bkt: &BTreeMap<Offset, Offset>,
+        bkt2name: &BTreeMap<Offset, TypeName>,
         bkt2size: &BTreeMap<Offset, Option<usize>>,
     ) -> Result<BucketSize, TypeError> {
         let mut size = BucketSize::NotResolved;
+        let mut size_name = HashSet::<TypeName>::new();
         for off in &self.original_candidates {
             let info = off2info.get(off).unwrap();
             let new_size = match info {
                 TypeInfo::Prim(p) => p.size(),
                 TypeInfo::Typedef(_, _) => continue,
                 TypeInfo::Enum(x) => {
-                    if x.is_decl {
+                    if x.is_decl && x.size == 0 {
                         continue;
                     }
                     Some(x.size)
                 }
                 TypeInfo::Struct(x) => {
-                    if x.is_decl {
+                    if x.is_decl && x.size == 0 {
                         continue;
                     }
                     Some(x.size)
                 }
                 TypeInfo::Union(x) => {
-                    if x.is_decl {
+                    if x.is_decl && x.size == 0 {
                         continue;
                     }
                     Some(x.size)
@@ -91,11 +93,22 @@ impl Bucket {
                         .attach_printable(format!(
                             "Old size: {:?} != New size: {:?}",
                             old_size, new_size
+                        ))
+                        .attach_printable(format!(
+                            "Names: {}",
+                            size_name
+                                .iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     return r;
                 }
             } else {
                 size = BucketSize::Size(new_size);
+                let bkt = off2bkt.get(off).unwrap();
+                let name = bkt2name.get(bkt).unwrap();
+                size_name.insert(name.clone());
             }
         }
         Ok(size)
@@ -129,7 +142,7 @@ impl Bucket {
                     // if bucket contains primitive, reduce the whole bucket to that primitive
                     self.type_ = BucketType::Prim;
                     self.names.clear();
-                    self.names.insert(TypeName::Prim(p.clone()));
+                    self.names.insert(TypeName::Prim(*p));
                     self.candidates.clear();
                     self.candidates.push(candidate);
                     return;
@@ -210,7 +223,7 @@ impl Bucket {
             let mut has_decl = false;
             let mut has_non_decl = false;
             for candidates in &self.candidates {
-                let info = off2info.get(&candidates).unwrap();
+                let info = off2info.get(candidates).unwrap();
                 if info.is_decl() {
                     has_decl = true;
                 } else {
@@ -219,7 +232,7 @@ impl Bucket {
             }
             if has_decl && has_non_decl {
                 self.candidates
-                    .retain(|candidate| !off2info.get(&candidate).unwrap().is_decl())
+                    .retain(|candidate| !off2info.get(candidate).unwrap().is_decl())
             }
         }
 
@@ -239,7 +252,7 @@ impl Bucket {
             let info = off2info.get(&candidate).unwrap();
             let c = match info {
                 TypeInfo::Comp(c) => c,
-                _ => panic!("reduce_comp_name called on non-comp"),
+                _ => continue,
             };
             match c {
                 TypeComp::Ptr(t) => {

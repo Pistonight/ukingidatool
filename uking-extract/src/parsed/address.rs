@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
-
 use error_stack::{report, Result, ResultExt};
 
 use crate::parsed::TypeError;
 
-use super::{Offset, TypeDef, TypeYaml, TypesStage1, TypesStage2, TypesStage6};
+use super::{Offset, TypeYaml, TypesStage1, TypesStage2, TypesStage6};
 
 /// Information about symbol at an address, linked to type offsets in DWARF
 #[derive(Clone, Debug)]
@@ -33,55 +31,38 @@ pub struct AddressDef {
 }
 
 impl AddressInfo {
-    pub fn into_def(
-        self,
-        types: &TypesStage6,
-        defs: &BTreeMap<String, TypeDef>,
-    ) -> Result<AddressDef, TypeError> {
-        let mut referenced_names = Vec::new();
+    pub fn into_def(self, types: &mut TypesStage6) -> Result<AddressDef, TypeError> {
         let (is_func, ty_yaml, args) = match self.info {
             AddrType::Undecompiled => (true, None, vec![]),
             AddrType::Data(info) => match info.ty_offset {
                 Some(ty) => {
+                    types.mark_referenced(&self.name, &ty);
                     let ty = types.get_name(&ty);
-                    for name in ty.referenced_names() {
-                        referenced_names.push(name);
-                    }
-                    (false, Some(ty.yaml_string()), vec![])
+                    let tyyaml = ty.yaml_string();
+                    (false, Some(tyyaml), vec![])
                 }
                 None => (false, None, vec![]),
             },
             AddrType::Func(info) => {
+                types.mark_referenced(&self.name, &info.ret_ty_offset);
                 let ty = types.get_name(&info.ret_ty_offset);
-                for name in ty.referenced_names() {
-                    referenced_names.push(name);
-                }
-                let ty_yaml = ty.yaml_string();
+                let tyyaml = ty.yaml_string();
                 let mut args = Vec::new();
                 for (name, ty) in info.args {
                     let ty = match ty {
                         Some(ty) => {
+                            types.mark_referenced(&self.name, &ty);
                             let ty = types.get_name(&ty);
-                            for name in ty.referenced_names() {
-                                referenced_names.push(name);
-                            }
-                            Some(ty.yaml_string())
+                            let tyyaml = ty.yaml_string();
+                            Some(tyyaml)
                         }
                         None => None,
                     };
                     args.push((name, ty));
                 }
-                (true, Some(ty_yaml), args)
+                (true, Some(tyyaml), args)
             }
         };
-
-        for name in referenced_names {
-            if !defs.contains_key(&name) {
-                let r = report!(TypeError::BrokenTypeRef(name.clone()))
-                    .attach_printable(format!("While creating definition for {}", self.name));
-                return Err(r);
-            }
-        }
 
         Ok(AddressDef {
             uking_address: self.uking_address,
@@ -108,7 +89,7 @@ impl TypeYaml for AddressDef {
             s.push_str(&format!(" {{ {tag}: '{}' }}\n", self.name));
             return s;
         }
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(&format!("    {tag}: '{}'\n", self.name));
         if let Some(t) = &self.ty_yaml {
             s.push_str(&format!("    type: [ {} ] \n", t));
@@ -198,19 +179,19 @@ impl std::fmt::Display for DataInfo {
 #[derive(Debug, thiserror::Error)]
 pub enum AddressInfoMismatch {
     #[error("Name mismatch")]
-    NameMismatch,
+    Name,
     #[error("Address type mismatch")]
-    TypeMismatch,
+    Type,
     #[error("Function return type mismatch")]
-    RetTypeMismatch,
+    RetType,
     #[error("Function argument count mismatch")]
-    ParamCountMismatch,
+    ParamCount,
     #[error("Function argument {0} type mismatch")]
-    ParamTypeMismatch(usize),
+    ParamType(usize),
     #[error("Function argument {0} name mismatch")]
-    ParamNameMismatch(usize),
+    ParamName(usize),
     #[error("Data type mismatch")]
-    DataTypeMismatch,
+    DataType,
 }
 
 impl AddressInfo {
@@ -221,17 +202,15 @@ impl AddressInfo {
     ) -> Result<(), AddressInfoMismatch> {
         // other wouldn't have address so we don't check
         if self.name != other.name {
-            return Err(report!(AddressInfoMismatch::NameMismatch))
+            return Err(report!(AddressInfoMismatch::Name))
                 .attach_printable(format!("self: {} != other: {}", self.name, other.name));
         }
 
         match (&mut self.info, &other.info) {
             (AddrType::Func(a), AddrType::Func(b)) => a.check_and_merge(b, types),
             (AddrType::Data(a), AddrType::Data(b)) => a.check_and_merge(b, types),
-            _ => {
-                return Err(report!(AddressInfoMismatch::TypeMismatch))
-                    .attach_printable(format!("self: {} != other: {}", self.info, other.info));
-            }
+            _ => Err(report!(AddressInfoMismatch::Type))
+                .attach_printable(format!("self: {} != other: {}", self.info, other.info)),
         }
     }
 
@@ -252,18 +231,20 @@ impl FuncInfo {
         types: &mut TypesStage1,
     ) -> Result<(), AddressInfoMismatch> {
         if self.args.len() != other.args.len() {
-            return Err(report!(AddressInfoMismatch::ParamCountMismatch)).attach_printable(
-                format!("self: {} != other: {}", self.args.len(), other.args.len()),
-            );
+            return Err(report!(AddressInfoMismatch::ParamCount)).attach_printable(format!(
+                "self: {} != other: {}",
+                self.args.len(),
+                other.args.len()
+            ));
         }
         types
             .check_and_merge(&self.ret_ty_offset, &other.ret_ty_offset)
-            .change_context(AddressInfoMismatch::RetTypeMismatch)?;
+            .change_context(AddressInfoMismatch::RetType)?;
         for (i, (a, b)) in self.args.iter_mut().zip(&other.args).enumerate() {
             match (&mut a.0, &b.0) {
                 (Some(a), Some(b)) => {
                     if a != b {
-                        return Err(report!(AddressInfoMismatch::ParamNameMismatch(i)))
+                        return Err(report!(AddressInfoMismatch::ParamName(i)))
                             .attach_printable(format!("self: {} != other: {}", a, b));
                     }
                 }
@@ -276,7 +257,7 @@ impl FuncInfo {
                 (Some(a), Some(b)) => {
                     types
                         .check_and_merge(a, b)
-                        .change_context(AddressInfoMismatch::ParamTypeMismatch(i))?;
+                        .change_context(AddressInfoMismatch::ParamType(i))?;
                 }
                 (None, Some(b)) => {
                     a.1.replace(*b);
@@ -307,7 +288,7 @@ impl DataInfo {
             (Some(a), Some(b)) => {
                 types
                     .check_and_merge(a, &b)
-                    .change_context(AddressInfoMismatch::DataTypeMismatch)?;
+                    .change_context(AddressInfoMismatch::DataType)?;
             }
             (None, Some(b)) => {
                 self.ty_offset.replace(b);

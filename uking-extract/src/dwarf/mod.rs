@@ -11,9 +11,10 @@ use gimli::{
 };
 
 use crate::parsed::{
-    AddrType, AddressInfo, DataInfo, FuncInfo, TypeInfo, TypePrim, TypesStage1, TypesStage6,
+    AddrType, AddressInfo, DataInfo, FuncInfo, TypeInfo, TypePrim, TypesStage0, TypesStage1,
+    TypesStage6,
 };
-use crate::util::ProgressPrinter;
+use common::ProgressPrinter;
 
 mod entry_integer;
 mod entry_name;
@@ -46,6 +47,7 @@ pub type Tree<'i, 'a, 'u> = gimli::EntriesTree<'a, 'u, In<'i>>;
 pub type Node<'i, 'a, 'u, 't> = gimli::EntriesTreeNode<'a, 'u, 't, In<'i>>;
 pub type Dwarf<'i> = gimli::Dwarf<In<'i>>;
 pub type UnitOffset = gimli::UnitOffset<usize>;
+#[allow(clippy::upper_case_acronyms)]
 pub type DIE<'i, 'a, 'u> = gimli::DebuggingInformationEntry<'a, 'u, In<'i>, usize>;
 
 #[derive(Debug, thiserror::Error)]
@@ -131,7 +133,7 @@ pub enum Error {
 
 macro_rules! process_units {
     ($units:ident, $desc:literal, $unit:ident, $root:ident, $block:block) => {{
-        let progress = $crate::util::ProgressPrinter::new($units.len(), $desc);
+        let progress = common::ProgressPrinter::new($units.len(), $desc);
         for (i, $unit) in $units.iter().enumerate() {
             progress.print(i, $unit.name);
             let mut tree = $unit.tree()?;
@@ -197,13 +199,12 @@ pub fn extract(
     let namespaces = read_namespace(&units)?;
     // PASS 2 - type info
     let mut types = {
-        let mut merges = Vec::new();
-        let mut off2info = BTreeMap::new();
-        off2info.insert(usize::MAX.into(), TypeInfo::Prim(TypePrim::Void));
+        let mut types = TypesStage0::new();
+        types.insert(usize::MAX, TypeInfo::Prim(TypePrim::Void));
         process_units!(units, "Register types", unit, root, {
-            read_types(root, unit, namespaces.as_ref(), &mut off2info, &mut merges)?;
+            read_types(root, unit, &namespaces, &mut types)?;
         });
-        TypesStage1::new(off2info, merges)
+        types.into_stage1()
     };
 
     // PASS 3 - symbols
@@ -228,28 +229,28 @@ pub fn extract(
                 // For example, the CSV could have both D1 and D2, while the DWARF only has D2
                 // it's probably fine to just coerce the type info
                 let mut alt_names = Vec::new();
-                if let Some(n) = replace_c_or_d_name(&symbol, "D1", "D2") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D1", "D2") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "D1", "D0") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D1", "D0") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "D2", "D1") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D2", "D1") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "D2", "D0") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D2", "D0") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "D0", "D1") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D0", "D1") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "D0", "D2") {
+                if let Some(n) = replace_c_or_d_name(symbol, "D0", "D2") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "C1", "C2") {
+                if let Some(n) = replace_c_or_d_name(symbol, "C1", "C2") {
                     alt_names.push(n);
                 }
-                if let Some(n) = replace_c_or_d_name(&symbol, "C2", "C1") {
+                if let Some(n) = replace_c_or_d_name(symbol, "C2", "C1") {
                     alt_names.push(n);
                 }
                 let mut found = false;
@@ -304,9 +305,9 @@ pub fn extract(
 /////////////// PASS 3 ///////////////
 // Create offset -> address symbol map (function and data)
 
-fn pass3<'d, 'i, 'a, 'u, 't>(
-    node: Node<'i, 'a, 'u, 't>,
-    unit: &UnitCtx<'d, 'i>,
+fn pass3<'i>(
+    node: Node<'i, '_, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
     uking_symbols: &mut BTreeMap<String, u64>,
     elf_addr_to_name: &mut BTreeMap<u64, String>,
     data_type: &mut BTreeMap<String, AddressInfo>,
@@ -316,7 +317,7 @@ fn pass3<'d, 'i, 'a, 'u, 't>(
     match entry.tag() {
         DW_TAG_subprogram => {
             read_subprogram(
-                &entry,
+                entry,
                 unit,
                 uking_symbols,
                 elf_addr_to_name,
@@ -326,7 +327,7 @@ fn pass3<'d, 'i, 'a, 'u, 't>(
             )?;
         }
         DW_TAG_variable => {
-            read_variable(&entry, unit, uking_symbols, data_type, types)?;
+            read_variable(entry, unit, uking_symbols, data_type, types)?;
         }
         _ => {}
     }
@@ -344,9 +345,9 @@ fn pass3<'d, 'i, 'a, 'u, 't>(
     Ok(())
 }
 
-fn read_subprogram<'d, 'i, 'a, 'u>(
-    entry: &DIE<'i, 'a, 'u>,
-    unit: &UnitCtx<'d, 'i>,
+fn read_subprogram<'i>(
+    entry: &DIE<'i, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
     uking_symbols: &mut BTreeMap<String, u64>,
     elf_addr_to_name: &mut BTreeMap<u64, String>,
     data_type: &mut BTreeMap<String, AddressInfo>,
@@ -470,9 +471,9 @@ fn read_subprogram<'d, 'i, 'a, 'u>(
     Ok(())
 }
 
-fn read_linkage_name<'d, 'i, 'a, 'u>(
-    entry: &DIE<'i, 'a, 'u>,
-    unit: &UnitCtx<'d, 'i>,
+fn read_linkage_name<'i>(
+    entry: &DIE<'i, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
 ) -> Result<Option<&'i str>, Error> {
     if let Some(linkage_name) = unit.get_entry_linkage_name(entry)? {
         return Ok(Some(linkage_name));
@@ -489,10 +490,7 @@ fn read_linkage_name<'d, 'i, 'a, 'u>(
     // ones that don't have name shouldn't matter
     Ok(None)
 }
-fn read_function_type<'d, 'i, 'a, 'u>(
-    entry: &DIE<'i, 'a, 'u>,
-    unit: &UnitCtx<'d, 'i>,
-) -> Result<usize, Error> {
+fn read_function_type<'i>(entry: &DIE<'i, '_, '_>, unit: &UnitCtx<'_, 'i>) -> Result<usize, Error> {
     if let Some(specification) = unit.get_entry_specification(entry)? {
         let origin_entry = unit.entry_at(specification)?;
         return read_function_type(&origin_entry, unit);
@@ -504,9 +502,9 @@ fn read_function_type<'d, 'i, 'a, 'u>(
     unit.get_entry_type_global_offset(entry)
 }
 
-fn try_get_alt_name<'d, 'i, 'a, 'u>(
-    unit: &UnitCtx<'d, 'i>,
-    entry: &DIE<'i, 'a, 'u>,
+fn try_get_alt_name<'i>(
+    unit: &UnitCtx<'_, 'i>,
+    entry: &DIE<'i, '_, '_>,
     linkage_name: &str,
     original: &str, // C1, C2, D1, D2
     replace: &str,  // C2, C1, D2, D1
@@ -546,8 +544,8 @@ fn try_get_alt_name<'d, 'i, 'a, 'u>(
             }
         }
     };
-    let name = if name.starts_with('~') {
-        &name[1..]
+    let name = if let Some(stripped) = name.strip_prefix('~') {
+        stripped
     } else {
         name
     };
@@ -607,8 +605,8 @@ fn replace_c_or_d_name(name: &str, original: &str, replace: &str) -> Option<Stri
     Some(s)
 }
 
-fn try_add_or_merge_info<'d, 'i>(
-    unit: &UnitCtx<'d, 'i>,
+fn try_add_or_merge_info(
+    unit: &UnitCtx,
     linkage_name: &str,
     offset: usize,
     mut addr_info: AddressInfo,
@@ -644,9 +642,9 @@ fn try_add_or_merge_info<'d, 'i>(
     Ok(false)
 }
 
-fn read_variable<'d, 'i, 'a, 'u>(
-    entry: &DIE<'i, 'a, 'u>,
-    unit: &UnitCtx<'d, 'i>,
+fn read_variable<'i>(
+    entry: &DIE<'i, '_, '_>,
+    unit: &UnitCtx<'_, 'i>,
     uking_symbols: &mut BTreeMap<String, u64>,
     data_type: &mut BTreeMap<String, AddressInfo>,
     types: &mut TypesStage1,

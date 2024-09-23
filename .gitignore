@@ -3,7 +3,7 @@
 /botw
 *.elf
 *.csv
-*.py
 /out
 *.yaml
+/*.py
 

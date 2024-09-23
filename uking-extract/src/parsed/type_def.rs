@@ -30,6 +30,7 @@ impl TypeDef {
         let ptmf = StructDef {
             name,
             size: 16,
+            alignment: 1,
             vtable: vec![],
             members,
         };
@@ -77,6 +78,8 @@ pub struct StructDef {
     pub vtable: Vec<(String, String)>,
     /// The size of the struct in bytes
     pub size: usize,
+    /// The alignment of the struct in bytes
+    pub alignment: usize,
     /// The members of the struct
     pub members: Vec<MemberDef>,
 }
@@ -84,6 +87,7 @@ impl TypeYaml for StructDef {
     fn yaml_string(&self) -> String {
         let mut s = format!("  - name: '{}'\n", self.name);
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
+        s.push_str(&format!("    align: 0x{:x}\n", self.alignment));
         if !self.vtable.is_empty() {
             s.push_str("    vtable:\n");
             for (func, ty) in &self.vtable {
@@ -97,7 +101,7 @@ impl TypeYaml for StructDef {
             s.push_str("    members:\n");
             for member in &self.members {
                 s.push_str(&member.yaml_string());
-                s.push_str("\n");
+                s.push('\n');
             }
         }
         s
@@ -164,6 +168,8 @@ pub struct UnionDef {
     pub name: String,
     /// The size of the union in bytes
     pub size: usize,
+    /// The alignment of the union in bytes
+    pub alignment: usize,
     /// The members of the union (name, type)
     pub members: Vec<(String, String)>,
 }
@@ -171,6 +177,7 @@ impl TypeYaml for UnionDef {
     fn yaml_string(&self) -> String {
         let mut s = format!("  - name: '{}'\n", self.name);
         s.push_str(&format!("    size: 0x{:x}\n", self.size));
+        s.push_str(&format!("    align: 0x{:x}\n", self.alignment));
         if !self.members.is_empty() {
             s.push_str("    members:\n");
             for (name, ty) in &self.members {

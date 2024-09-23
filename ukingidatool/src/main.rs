@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use error_stack::ResultExt;
 
+mod extract;
 mod ida_import;
 mod tyyaml;
 
@@ -17,6 +18,8 @@ pub struct CLI {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum Subcommand {
+    /// Extract data types from DWARF info from the botw decompile project
+    Extract(extract::ExtractCLI),
     /// Generate a IDA Python script to import extract data. Requires IDA Pro 7.6+
     Import(ida_import::IDAImportCLI),
 }
@@ -24,20 +27,13 @@ pub enum Subcommand {
 fn main() -> ExitCode {
     let CLI { subcommand } = CLI::parse();
     match subcommand {
+        Subcommand::Extract(cli) => common::run(|| {
+            extract::run_cli(cli)
+                .attach_printable_lazy(|| "See `ukingidatool extract --help` for more information")
+        }),
         Subcommand::Import(cli) => common::run(|| {
             ida_import::run_cli(cli)
                 .attach_printable_lazy(|| "See `ukingidatool import --help` for more information")
         }),
     }
-    // let input = "output.yaml";
-    // let output = "import.py";
-    // let type_pattern = "";
-    // let type_only = false;
-    // let options = ida_import::IDAImportOptions {
-    //     input: input.into(),
-    //     output: output.into(),
-    //     type_pattern: type_pattern.to_string(),
-    //     type_only,
-    // };
-    // common::run(|| ida_import::create_ida_import(&options))
 }

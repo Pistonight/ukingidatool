@@ -2,7 +2,7 @@ version: '3'
 
 tasks:
   extract:
-    desc: Run uking-extract on test file
+    desc: Run uking-extract on test file. Debug feature flags available
     dir: .
     cmds:
     - cargo run --release --bin uking-extract {{.CLI_ARGS}}

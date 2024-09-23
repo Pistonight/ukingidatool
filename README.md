@@ -115,4 +115,6 @@ Then, run the generated script in IDA with File > Script File... and select the 
 After running the script, wait for the auto analysis to finish (should say `AU: idle` in the bottom-left), then try saving and reopen the database to make sure it's not corrupted.
 I recommend still keeping the backup around just in case.
 
+sometimes, renaming function argument types after importing types immediately will fail. You can rerun with `--skip-types` to retry.
+
 

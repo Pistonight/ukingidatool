@@ -1,4 +1,7 @@
 # UKing IDA Tool
+
+# This project has been moved to https://github.com/Pistonight/symbotw
+
 Tool for importing the BOTW decompile project into IDA Pro.
 All you need is the BOTW decompile project and no other dependencies.
 
